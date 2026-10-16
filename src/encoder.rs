@@ -464,10 +464,9 @@ impl Encoder {
         self.frame_lengths.push(header.frame_len() as u32);
 
         // Bits this frame can use, and how many it must use: whatever the
-        // next frame can't borrow is lost.
-        // Leave the last byte unused: some decoders (symphonia) reject a
-        // frame whose main data fills its space exactly when a later
-        // granule in it is empty.
+        // next frame can't borrow is lost. The last byte stays unused: some
+        // decoders (symphonia) reject a frame whose main data fills its
+        // space exactly when a later granule in it is empty.
         let available = (8 * (main_data_begin + slot_len) as u32).saturating_sub(8);
         let must_use = available.saturating_sub(8 * self.reservoir.max_begin() as u32);
 
