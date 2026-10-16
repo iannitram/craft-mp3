@@ -62,7 +62,10 @@ better):
 | tonal solo            |     64 |      6.8% | 10.9% | 37.5% |
 | clicks in silence     |     64 |     23.7% | 28.1% | 96.1% |
 
-That is a rough objective measure, not a listening test.
+That is a rough objective measure, not a listening test, and its masking
+estimate resembles the encoder's own model, so it likely flatters
+craft-mp3. Read it as "in LAME's league on this material", not "better than
+LAME".
 
 ## Testing
 
