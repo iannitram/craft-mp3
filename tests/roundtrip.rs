@@ -181,3 +181,39 @@ fn silence_and_full_scale_both_decode() {
     let (output, _, _) = decode(encode(config, &square));
     assert!(output.iter().any(|&s| s.abs() > 0.5));
 }
+
+#[test]
+fn transients_do_not_smear_ahead_in_time() {
+    // Isolated clicks in silence: with long blocks only, quantization noise
+    // spreads over the whole 1152-sample window, well before each click.
+    let rate = 44_100usize;
+    let mut input = vec![0.0f32; rate * 2];
+    let clicks = [20_000usize, 45_000, 70_000];
+    for &at in &clicks {
+        for n in 0..1500 {
+            let t = n as f64 / rate as f64;
+            input[at + n] = (0.6 * (-t * 300.0).exp() * (2.0 * PI * 2500.0 * t).sin()) as f32;
+        }
+    }
+    let config = EncoderConfig {
+        sample_rate: 44_100,
+        channels: 1,
+        bitrate_kbps: 64,
+    };
+    let (output, _, _) = decode(encode(config, &input));
+
+    for &at in &clicks {
+        let energy = |range: std::ops::Range<usize>| -> f64 {
+            range
+                .map(|n| f64::from(output[n + ENCODER_DELAY]).powi(2))
+                .sum()
+        };
+        let click = energy(at..at + 1500);
+        // 300 to 1000 samples before the click: past the filterbank's own
+        // spread, but inside a long window. Long blocks only give about
+        // -25 dB here; short blocks better than -50 dB.
+        let before = energy(at - 1000..at - 300);
+        let db = 10.0 * (before / click).log10();
+        assert!(db < -45.0, "pre-echo {db:.1} dB before the click at {at}");
+    }
+}

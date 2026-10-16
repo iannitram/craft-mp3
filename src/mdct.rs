@@ -2,8 +2,11 @@
 //! followed by the alias-reduction butterflies (ISO/IEC 11172-3, 2.4.3.4).
 //!
 //! Each granule turns 18 time slots of 32 subband samples into 576
-//! frequency lines, in the order the bitstream carries them for long
-//! blocks: subband 0's 18 lines first, then subband 1's, and so on.
+//! frequency lines in subband order: subband 0's 18 lines first, then
+//! subband 1's, and so on. Long blocks (normal, start and stop) give 18
+//! lines per subband; short blocks give three windows of 6 lines each,
+//! interleaved as `3 * k + window`, which is how the decoder lays them out
+//! before its IMDCT.
 
 use std::f64::consts::PI;
 use std::sync::OnceLock;
@@ -17,16 +20,69 @@ pub const SLOTS: usize = 18;
 pub const GRANULE_LINES: usize = SUBBANDS * SLOTS;
 
 const LONG: usize = 2 * SLOTS;
+const SHORT: usize = 12;
+const SHORT_LINES: usize = SHORT / 2;
+
+/// The window shape of a granule (`block_type` in the side information).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum BlockType {
+    #[default]
+    Normal = 0,
+    /// Long window that switches to short at its end.
+    Start = 1,
+    /// Three short windows, for transients.
+    Short = 2,
+    /// Long window that switches back from short at its start.
+    Stop = 3,
+}
+
+impl BlockType {
+    /// The window shape for a granule, given the previous granule's shape
+    /// and whether this granule and the next one contain an attack.
+    pub fn next(prev: BlockType, attack_here: bool, attack_next: bool) -> BlockType {
+        let prev_short = prev == BlockType::Short;
+        match (attack_here, attack_next) {
+            (true, _) => BlockType::Short,
+            (false, true) if prev_short => BlockType::Short,
+            (false, true) => BlockType::Start,
+            (false, false) if prev_short => BlockType::Stop,
+            (false, false) => BlockType::Normal,
+        }
+    }
+}
 
 /// Alias-reduction coefficients `c[i]` (Table B.9).
 const ALIAS_C: [f64; 8] = [
     -0.6, -0.535, -0.33, -0.185, -0.095, -0.041, -0.0142, -0.0037,
 ];
 
+/// The 36-point window for a long block type (2.4.3.4.10.1).
+fn long_window(block: BlockType, n: usize) -> f64 {
+    let long = || (PI / LONG as f64 * (n as f64 + 0.5)).sin();
+    let short = |offset: usize| (PI / SHORT as f64 * ((n - offset) as f64 + 0.5)).sin();
+    match block {
+        BlockType::Normal | BlockType::Short => long(),
+        BlockType::Start => match n {
+            0..18 => long(),
+            18..24 => 1.0,
+            24..30 => short(18),
+            _ => 0.0,
+        },
+        BlockType::Stop => match n {
+            0..6 => 0.0,
+            6..12 => short(6),
+            12..18 => 1.0,
+            _ => long(),
+        },
+    }
+}
+
 struct Tables {
-    /// Sine window times the MDCT kernel and the forward scale factor,
-    /// `[k * 36 + n]`.
-    kernel: Box<[f32; SLOTS * LONG]>,
+    /// Window times MDCT kernel times the forward 2/N scale, `[k * 36 + n]`,
+    /// for normal, start and stop blocks.
+    long: [Box<[f32; SLOTS * LONG]>; 3],
+    /// The same for one short window, `[k * 12 + n]`.
+    short: [f32; SHORT_LINES * SHORT],
     cs: [f32; 8],
     ca: [f32; 8],
 }
@@ -34,16 +90,30 @@ struct Tables {
 fn tables() -> &'static Tables {
     static TABLES: OnceLock<Tables> = OnceLock::new();
     TABLES.get_or_init(|| {
-        let mut kernel = Box::new([0.0; SLOTS * LONG]);
-        for k in 0..SLOTS {
-            for n in 0..LONG {
-                let window = (PI / LONG as f64 * (n as f64 + 0.5)).sin();
-                let basis =
-                    (PI / (2 * LONG) as f64 * (2 * n + 1 + SLOTS) as f64 * (2 * k + 1) as f64)
-                        .cos();
-                // The decoder's IMDCT is unscaled, so the forward transform
-                // carries the whole 2/N normalisation.
-                kernel[k * LONG + n] = (window * basis * 2.0 / SLOTS as f64) as f32;
+        // The decoder's IMDCT is unscaled, so the forward transform carries
+        // the whole 2/N normalisation.
+        let long = [BlockType::Normal, BlockType::Start, BlockType::Stop].map(|block| {
+            let mut kernel = Box::new([0.0; SLOTS * LONG]);
+            for k in 0..SLOTS {
+                for n in 0..LONG {
+                    let basis =
+                        (PI / (2 * LONG) as f64 * (2 * n + 1 + SLOTS) as f64 * (2 * k + 1) as f64)
+                            .cos();
+                    kernel[k * LONG + n] =
+                        (long_window(block, n) * basis * 2.0 / SLOTS as f64) as f32;
+                }
+            }
+            kernel
+        });
+        let mut short = [0.0; SHORT_LINES * SHORT];
+        for k in 0..SHORT_LINES {
+            for n in 0..SHORT {
+                let window = (PI / SHORT as f64 * (n as f64 + 0.5)).sin();
+                let basis = (PI / (2 * SHORT) as f64
+                    * (2 * n + 1 + SHORT_LINES) as f64
+                    * (2 * k + 1) as f64)
+                    .cos();
+                short[k * SHORT + n] = (window * basis * 2.0 / SHORT_LINES as f64) as f32;
             }
         }
         let mut cs = [0.0; 8];
@@ -53,7 +123,12 @@ fn tables() -> &'static Tables {
             cs[i] = (1.0 / norm) as f32;
             ca[i] = (c / norm) as f32;
         }
-        Tables { kernel, cs, ca }
+        Tables {
+            long,
+            short,
+            cs,
+            ca,
+        }
     })
 }
 
@@ -77,9 +152,15 @@ impl Mdct {
         }
     }
 
-    /// Transforms one granule. `slots[t][sb]` is subband `sb` at time slot
-    /// `t`, as produced by [`crate::filterbank::AnalysisFilterbank`].
-    pub fn process(&mut self, slots: &[[f32; SUBBANDS]; SLOTS], out: &mut [f32; GRANULE_LINES]) {
+    /// Transforms one granule with the given window shape. `slots[t][sb]` is
+    /// subband `sb` at time slot `t`, as produced by
+    /// [`crate::filterbank::AnalysisFilterbank`].
+    pub fn process(
+        &mut self,
+        slots: &[[f32; SUBBANDS]; SLOTS],
+        block: BlockType,
+        out: &mut [f32; GRANULE_LINES],
+    ) {
         let t = tables();
 
         for sb in 0..SUBBANDS {
@@ -95,18 +176,40 @@ impl Mdct {
                 };
             }
 
-            let mut block = [0.0f32; LONG];
-            block[..SLOTS].copy_from_slice(&self.prev[sb]);
-            block[SLOTS..].copy_from_slice(&cur);
+            let mut z = [0.0f32; LONG];
+            z[..SLOTS].copy_from_slice(&self.prev[sb]);
+            z[SLOTS..].copy_from_slice(&cur);
             self.prev[sb] = cur;
 
             let lines = &mut out[sb * SLOTS..(sb + 1) * SLOTS];
-            for (k, line) in lines.iter_mut().enumerate() {
-                let row = &t.kernel[k * LONG..(k + 1) * LONG];
-                *line = row.iter().zip(&block).map(|(a, b)| a * b).sum();
+            match block {
+                BlockType::Short => {
+                    // Three half-overlapping 12-point windows starting at 6, 12, 18.
+                    for window in 0..3 {
+                        let input = &z[6 + 6 * window..6 + 6 * window + SHORT];
+                        for k in 0..SHORT_LINES {
+                            let row = &t.short[k * SHORT..(k + 1) * SHORT];
+                            lines[3 * k + window] = row.iter().zip(input).map(|(a, b)| a * b).sum();
+                        }
+                    }
+                }
+                _ => {
+                    let kernel = match block {
+                        BlockType::Start => &t.long[1],
+                        BlockType::Stop => &t.long[2],
+                        _ => &t.long[0],
+                    };
+                    for (k, line) in lines.iter_mut().enumerate() {
+                        let row = &kernel[k * LONG..(k + 1) * LONG];
+                        *line = row.iter().zip(&z).map(|(a, b)| a * b).sum();
+                    }
+                }
             }
         }
 
+        if block == BlockType::Short {
+            return;
+        }
         // Alias reduction: the transpose of the decoder's butterflies.
         for sb in 1..SUBBANDS {
             for i in 0..8 {
@@ -137,34 +240,58 @@ pub(crate) mod tests {
             }
         }
 
-        pub(crate) fn process(&mut self, lines: &[f32; GRANULE_LINES]) -> [[f32; SUBBANDS]; SLOTS] {
+        pub(crate) fn process(
+            &mut self,
+            lines: &[f32; GRANULE_LINES],
+            block: BlockType,
+        ) -> [[f32; SUBBANDS]; SLOTS] {
             let mut xr: Vec<f64> = lines.iter().map(|&x| f64::from(x)).collect();
-            for sb in 1..SUBBANDS {
-                for (i, &c) in ALIAS_C.iter().enumerate() {
-                    let norm = (1.0 + c * c).sqrt();
-                    let (cs, ca) = (1.0 / norm, c / norm);
-                    let lower = sb * SLOTS - 1 - i;
-                    let upper = sb * SLOTS + i;
-                    let (a, b) = (xr[lower], xr[upper]);
-                    xr[lower] = a * cs - b * ca;
-                    xr[upper] = b * cs + a * ca;
+            if block != BlockType::Short {
+                for sb in 1..SUBBANDS {
+                    for (i, &c) in ALIAS_C.iter().enumerate() {
+                        let norm = (1.0 + c * c).sqrt();
+                        let (cs, ca) = (1.0 / norm, c / norm);
+                        let lower = sb * SLOTS - 1 - i;
+                        let upper = sb * SLOTS + i;
+                        let (a, b) = (xr[lower], xr[upper]);
+                        xr[lower] = a * cs - b * ca;
+                        xr[upper] = b * cs + a * ca;
+                    }
                 }
             }
 
             let mut slots = [[0.0f32; SUBBANDS]; SLOTS];
             for sb in 0..SUBBANDS {
+                let x = &xr[sb * SLOTS..(sb + 1) * SLOTS];
                 let mut y = [0.0f64; LONG];
-                for (n, y) in y.iter_mut().enumerate() {
-                    let sum: f64 = (0..SLOTS)
-                        .map(|k| {
-                            xr[sb * SLOTS + k]
-                                * (PI / (2 * LONG) as f64
+                if block == BlockType::Short {
+                    for window in 0..3 {
+                        for n in 0..SHORT {
+                            let sum: f64 = (0..SHORT_LINES)
+                                .map(|k| {
+                                    x[3 * k + window]
+                                        * (PI / (2 * SHORT) as f64
+                                            * (2 * n + 1 + SHORT_LINES) as f64
+                                            * (2 * k + 1) as f64)
+                                            .cos()
+                                })
+                                .sum();
+                            let w = (PI / SHORT as f64 * (n as f64 + 0.5)).sin();
+                            y[6 + 6 * window + n] += sum * w;
+                        }
+                    }
+                } else {
+                    for (n, y) in y.iter_mut().enumerate() {
+                        let sum: f64 = (0..SLOTS)
+                            .map(|k| {
+                                x[k] * (PI / (2 * LONG) as f64
                                     * (2 * n + 1 + SLOTS) as f64
                                     * (2 * k + 1) as f64)
                                     .cos()
-                        })
-                        .sum();
-                    *y = sum * (PI / LONG as f64 * (n as f64 + 0.5)).sin();
+                            })
+                            .sum();
+                        *y = sum * long_window(block, n);
+                    }
                 }
                 for slot in 0..SLOTS {
                     let mut v = y[slot] + self.overlap[sb][slot];
@@ -185,15 +312,46 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn inverse_reconstructs_the_previous_granule() {
+    fn block_type_sequence_follows_the_standard() {
+        use BlockType::*;
+        let attacks = [false, false, true, false, false, true, true, false, false];
+        let mut prev = Normal;
+        let mut seq = Vec::new();
+        for (i, &here) in attacks.iter().enumerate() {
+            let next = attacks.get(i + 1).copied().unwrap_or(false);
+            prev = BlockType::next(prev, here, next);
+            seq.push(prev);
+        }
+        assert_eq!(
+            seq,
+            [
+                Normal, Start, Short, Stop, Start, Short, Short, Stop, Normal
+            ]
+        );
+        // Every short block is entered through Start (or Short) and left through Stop (or Short).
+        for pair in seq.windows(2) {
+            if pair[1] == Short {
+                assert!(matches!(pair[0], Start | Short));
+            }
+            if pair[0] == Short {
+                assert!(matches!(pair[1], Stop | Short));
+            }
+        }
+    }
+
+    #[test]
+    fn inverse_reconstructs_across_window_switches() {
+        use BlockType::*;
+        let blocks = [
+            Normal, Start, Short, Short, Stop, Normal, Start, Short, Stop, Normal,
+        ];
         let mut seed = 1;
-        let granules: Vec<[[f32; SUBBANDS]; SLOTS]> = (0..6)
+        let granules: Vec<[[f32; SUBBANDS]; SLOTS]> = blocks
+            .iter()
             .map(|_| {
                 let mut g = [[0.0; SUBBANDS]; SLOTS];
-                for slot in g.iter_mut() {
-                    for s in slot.iter_mut() {
-                        *s = pseudo_random(&mut seed);
-                    }
+                for x in g.iter_mut().flatten() {
+                    *x = pseudo_random(&mut seed);
                 }
                 g
             })
@@ -202,13 +360,16 @@ pub(crate) mod tests {
         let mut mdct = Mdct::new();
         let mut inverse = Inverse::new();
         let mut lines = [0.0; GRANULE_LINES];
-        for (i, granule) in granules.iter().enumerate() {
-            mdct.process(granule, &mut lines);
-            let out = inverse.process(&lines);
+        for (i, (granule, &block)) in granules.iter().zip(&blocks).enumerate() {
+            mdct.process(granule, block, &mut lines);
+            let out = inverse.process(&lines, block);
             // Overlap-add completes a granule one granule later.
             if i > 0 {
                 for (got, want) in out.iter().flatten().zip(granules[i - 1].iter().flatten()) {
-                    assert!((got - want).abs() < 1e-5, "granule {i}: {got} vs {want}");
+                    assert!(
+                        (got - want).abs() < 1e-5,
+                        "granule {i} ({block:?}): {got} vs {want}"
+                    );
                 }
             }
         }
@@ -234,7 +395,7 @@ pub(crate) mod tests {
                 }
                 fb.process(&input, slot);
             }
-            mdct.process(&slots, &mut lines);
+            mdct.process(&slots, BlockType::Normal, &mut lines);
         }
         let energy: Vec<f64> = lines.iter().map(|&x| f64::from(x) * f64::from(x)).collect();
         let total: f64 = energy.iter().sum();

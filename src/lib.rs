@@ -2,12 +2,14 @@
 //!
 //! The encoder is built up module by module, each with its own tests.
 
+mod attack;
 pub mod bitstream;
 mod encoder;
 pub mod filterbank;
 pub mod header;
 mod huffman;
 mod huffman_tables;
+mod layout;
 pub mod mdct;
 mod psycho;
 mod quantize;

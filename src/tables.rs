@@ -99,3 +99,12 @@ pub(crate) const SLEN: [(u32, u32); 16] = [
 pub(crate) const PRETAB: [u8; 22] = [
     0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 3, 3, 3, 2, 0,
 ];
+
+/// Short-block scale-factor band boundaries in lines of one window
+/// (Table B.8), for 44.1, 48 and 32 kHz.
+pub(crate) const SFB_SHORT_44100: [usize; 14] =
+    [0, 4, 8, 12, 16, 22, 30, 40, 52, 66, 84, 106, 136, 192];
+pub(crate) const SFB_SHORT_48000: [usize; 14] =
+    [0, 4, 8, 12, 16, 22, 28, 38, 50, 64, 80, 100, 126, 192];
+pub(crate) const SFB_SHORT_32000: [usize; 14] =
+    [0, 4, 8, 12, 16, 22, 30, 42, 58, 78, 104, 138, 180, 192];

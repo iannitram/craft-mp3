@@ -3,16 +3,17 @@
 use std::f32::consts::FRAC_1_SQRT_2;
 use std::fmt;
 
+use crate::attack::AttackDetector;
 use crate::bitstream::BitWriter;
 use crate::filterbank::{AnalysisFilterbank, SUBBANDS};
 use crate::header::{
     Bitrate, ChannelMode, FrameHeader, PaddingSchedule, SAMPLES_PER_FRAME, SampleRate,
 };
-use crate::mdct::{GRANULE_LINES, Mdct, SLOTS};
+use crate::layout::Layout;
+use crate::mdct::{BlockType, GRANULE_LINES, Mdct, SLOTS};
 use crate::psycho::Psycho;
-use crate::quantize::{self, Granule, SfbBounds};
+use crate::quantize::{self, Granule};
 use crate::reservoir::{MAX_MAIN_DATA_BEGIN, Reservoir};
-use crate::tables::{SFB_LONG_32000, SFB_LONG_44100, SFB_LONG_48000};
 
 const GRANULES: usize = 2;
 
@@ -54,12 +55,17 @@ impl fmt::Display for ConfigError {
 
 impl std::error::Error for ConfigError {}
 
+/// Input samples beyond the current frame needed to decide its block types:
+/// the attack detector must see the granule after the frame.
+const LOOKAHEAD: usize = 576;
+
 /// Per-channel analysis state.
 #[derive(Clone, Default)]
 struct ChannelState {
     filterbank: AnalysisFilterbank,
     mdct: Mdct,
-    /// Input samples waiting for a full frame.
+    attacks: AttackDetector,
+    /// Input samples waiting for a full frame plus lookahead.
     pending: Vec<f32>,
 }
 
@@ -71,13 +77,16 @@ struct ChannelState {
 pub struct Encoder {
     template: FrameHeader,
     padding: PaddingSchedule,
-    sfb: &'static SfbBounds,
+    layout: Layout,
     channels: Vec<ChannelState>,
     reservoir: Reservoir,
     psycho: Psycho,
-    /// Per-line gain applied before quantization: 1 in the passband, 0 above
-    /// the bitrate's cutoff.
-    lowpass: Box<[f32; GRANULE_LINES]>,
+    /// Per-line gain applied before quantization, for long and short
+    /// blocks: 1 in the passband, 0 above the bitrate's cutoff.
+    lowpass_long: Box<[f32; GRANULE_LINES]>,
+    lowpass_short: Box<[f32; GRANULE_LINES]>,
+    /// Block type of the last granule encoded.
+    last_block: BlockType,
     /// Channel the next interleaved input sample belongs to.
     next_channel: usize,
 }
@@ -96,23 +105,19 @@ impl Encoder {
             },
             n => return Err(ConfigError::UnsupportedChannels(n)),
         };
-        let sfb = match sample_rate {
-            SampleRate::Hz32000 => &SFB_LONG_32000,
-            SampleRate::Hz44100 => &SFB_LONG_44100,
-            SampleRate::Hz48000 => &SFB_LONG_48000,
-        };
+        let layout = Layout::new(sample_rate.hz());
+        let kbps_per_channel = config.bitrate_kbps / u32::from(config.channels);
 
         Ok(Self {
             template: FrameHeader::new(bitrate, sample_rate, mode),
             padding: PaddingSchedule::new(bitrate, sample_rate),
-            sfb,
+            psycho: Psycho::new(&layout),
+            lowpass_long: lowpass(&layout, BlockType::Normal, kbps_per_channel),
+            lowpass_short: lowpass(&layout, BlockType::Short, kbps_per_channel),
+            layout,
             channels: vec![ChannelState::default(); usize::from(config.channels)],
             reservoir: Reservoir::default(),
-            psycho: Psycho::new(config.sample_rate, sfb),
-            lowpass: lowpass(
-                config.sample_rate,
-                config.bitrate_kbps / u32::from(config.channels),
-            ),
+            last_block: BlockType::Normal,
             next_channel: 0,
         })
     }
@@ -124,9 +129,11 @@ impl Encoder {
         let n = self.channels.len();
         for &sample in samples {
             let ch = self.next_channel;
-            self.channels[ch].pending.push(sample);
+            let state = &mut self.channels[ch];
+            state.pending.push(sample);
+            state.attacks.push(sample);
             self.next_channel = (ch + 1) % n;
-            if ch == n - 1 && self.channels[ch].pending.len() == SAMPLES_PER_FRAME {
+            if ch == n - 1 && state.pending.len() == SAMPLES_PER_FRAME + LOOKAHEAD {
                 self.encode_frame(out);
             }
         }
@@ -145,19 +152,40 @@ impl Encoder {
         while self.next_channel != 0 {
             self.encode(&[0.0], out);
         }
-        // Buffered samples plus the filterbank delay must all reach a frame.
-        let frames = (self.channels[0].pending.len() + ENCODER_DELAY).div_ceil(SAMPLES_PER_FRAME);
-        for _ in 0..frames {
-            for ch in &mut self.channels {
-                ch.pending.resize(SAMPLES_PER_FRAME, 0.0);
-            }
-            self.encode_frame(out);
-        }
+        // Buffered samples plus the filterbank delay must all reach a frame,
+        // and the last frame needs its lookahead too.
+        let buffered = self.channels[0].pending.len();
+        let frames = (buffered + ENCODER_DELAY).div_ceil(SAMPLES_PER_FRAME);
+        let silence = frames * SAMPLES_PER_FRAME + LOOKAHEAD - buffered;
+        let zeros = vec![0.0; silence * self.channels.len()];
+        self.encode(&zeros, out);
         self.reservoir.drain_all(out);
+    }
+
+    /// Block types for this frame's two granules, the same for every
+    /// channel (mid/side coding needs matching windows).
+    fn block_types(&mut self) -> [BlockType; GRANULES] {
+        let attack = |g: usize| {
+            self.channels.iter().any(|c| {
+                c.attacks
+                    .attack(g)
+                    .expect("lookahead covers the next granule")
+            })
+        };
+        let (a0, a1, a2) = (attack(0), attack(1), attack(2));
+        let first = BlockType::next(self.last_block, a0, a1);
+        let second = BlockType::next(first, a1, a2);
+        self.last_block = second;
+        for state in &mut self.channels {
+            state.attacks.pop();
+            state.attacks.pop();
+        }
+        [first, second]
     }
 
     fn encode_frame(&mut self, out: &mut Vec<u8>) {
         let channels = self.channels.len();
+        let blocks = self.block_types();
 
         let mut xr = vec![[[0.0f32; GRANULE_LINES]; GRANULES]; channels];
         for (ch, state) in self.channels.iter_mut().enumerate() {
@@ -168,17 +196,18 @@ impl Encoder {
                     let input = state.pending[start..start + SUBBANDS].try_into().unwrap();
                     state.filterbank.process(input, slot);
                 }
-                state.mdct.process(&slots, xr);
-            }
-            state.pending.clear();
-        }
-
-        for granules in &mut xr {
-            for xr in granules.iter_mut() {
-                for (x, w) in xr.iter_mut().zip(self.lowpass.iter()) {
+                state.mdct.process(&slots, blocks[gr], xr);
+                let weights = if blocks[gr] == BlockType::Short {
+                    *xr = self.layout.short_to_bitstream(xr);
+                    &self.lowpass_short
+                } else {
+                    &self.lowpass_long
+                };
+                for (x, w) in xr.iter_mut().zip(weights.iter()) {
                     *x *= w;
                 }
             }
+            state.pending.drain(..SAMPLES_PER_FRAME);
         }
 
         let mid_side = channels == 2 && prefers_mid_side(&xr[0], &xr[1]);
@@ -217,8 +246,10 @@ impl Encoder {
         let demands: Vec<Granule> = order
             .iter()
             .map(|&(gr, ch)| {
-                let allowed = self.psycho.thresholds(&xr[ch][gr]);
-                quantize::perceptual(&xr[ch][gr], &allowed, self.sfb)
+                let allowed = self
+                    .psycho
+                    .thresholds(&self.layout, &xr[ch][gr], blocks[gr]);
+                quantize::perceptual(&xr[ch][gr], blocks[gr], &allowed, &self.layout)
             })
             .collect();
         let demand: u32 = demands.iter().map(Granule::part2_3_length).sum();
@@ -247,8 +278,14 @@ impl Encoder {
                     let budget = (u64::from(remaining) * u64::from(weight)
                         / u64::from(remaining_weight)) as u32;
                     let min_gain = if finer_allowed { 0 } else { d.global_gain };
-                    let g =
-                        quantize::rate_loop(&xr[ch][gr], d.scalefac, self.sfb, budget, min_gain);
+                    let g = quantize::rate_loop(
+                        &xr[ch][gr],
+                        blocks[gr],
+                        d.scalefac,
+                        &self.layout,
+                        budget,
+                        min_gain,
+                    );
                     remaining = remaining.saturating_sub(g.part2_3_length());
                     remaining_weight -= weight;
                     g
@@ -260,7 +297,7 @@ impl Encoder {
 
         let mut main_data = BitWriter::with_capacity(main_data_begin + slot_len);
         for granule in &granules {
-            granule.write_main_data(&mut main_data, self.sfb);
+            granule.write_main_data(&mut main_data, &self.layout);
         }
         main_data.align_to_byte();
 
@@ -310,15 +347,19 @@ fn cutoff_hz(kbps_per_channel: u32) -> f32 {
     f0 + (f1 - f0) * (kbps_per_channel - k0) as f32 / (k1 - k0) as f32
 }
 
-/// Per-line weights: a short linear taper ending at the cutoff.
-fn lowpass(sample_rate: u32, kbps_per_channel: u32) -> Box<[f32; GRANULE_LINES]> {
-    let line_hz = sample_rate as f32 / 2.0 / GRANULE_LINES as f32;
-    let stop = cutoff_hz(kbps_per_channel);
+/// Per-line weights, in bitstream order for `block`: a short linear taper
+/// ending at the cutoff.
+fn lowpass(layout: &Layout, block: BlockType, kbps_per_channel: u32) -> Box<[f32; GRANULE_LINES]> {
+    let stop = cutoff_hz(kbps_per_channel) as f64;
     let start = stop * 0.94;
     let mut weights = Box::new([0.0; GRANULE_LINES]);
-    for (line, w) in weights.iter_mut().enumerate() {
-        let f = (line as f32 + 0.5) * line_hz;
-        *w = ((stop - f) / (stop - start)).clamp(0.0, 1.0);
+    for p in layout.partitions(block) {
+        let lines = p.lines.len();
+        for (i, line) in p.lines.clone().enumerate() {
+            let f =
+                p.lowest_hz + (p.highest_hz - p.lowest_hz) * i as f64 / (lines - 1).max(1) as f64;
+            weights[line] = ((stop - f) / (stop - start)).clamp(0.0, 1.0) as f32;
+        }
     }
     weights
 }
@@ -345,8 +386,8 @@ fn prefers_mid_side(
 /// synthesis filterbanks plus one granule of MDCT overlap.
 pub const ENCODER_DELAY: usize = 481 + GRANULE_LINES;
 
-/// Writes MPEG-1 side information for long blocks (2.4.1.7).
-/// `granules` is in bitstream order: granule 0's channels, then granule 1's.
+/// Writes MPEG-1 side information (2.4.1.7). `granules` is in bitstream
+/// order: granule 0's channels, then granule 1's.
 fn write_side_info(
     w: &mut BitWriter,
     main_data_begin: usize,
@@ -363,12 +404,24 @@ fn write_side_info(
         w.write_bits(g.big_values as u32, 9);
         w.write_bits(g.global_gain, 8);
         w.write_bits(g.scalefac.compress as u32, 4);
-        w.write_bit(false); // window_switching_flag: long blocks only
-        for &table in &g.table_select {
-            w.write_bits(table as u32, 5);
+        let switched = g.block != BlockType::Normal;
+        w.write_bit(switched); // window_switching_flag
+        if switched {
+            w.write_bits(g.block as u32, 2);
+            w.write_bit(false); // mixed_block_flag
+            for &table in &g.table_select[..2] {
+                w.write_bits(table as u32, 5);
+            }
+            for &gain in &g.scalefac.subblock_gain {
+                w.write_bits(u32::from(gain), 3);
+            }
+        } else {
+            for &table in &g.table_select {
+                w.write_bits(table as u32, 5);
+            }
+            w.write_bits(g.region0_count as u32, 4);
+            w.write_bits(g.region1_count as u32, 3);
         }
-        w.write_bits(g.region0_count as u32, 4);
-        w.write_bits(g.region1_count as u32, 3);
         w.write_bit(g.scalefac.preflag);
         w.write_bit(g.scalefac.scale);
         w.write_bit(g.count1_table_b);
@@ -458,11 +511,27 @@ mod tests {
             last = f;
         }
         assert_eq!(cutoff_hz(64), 17_000.0);
-        let w = lowpass(44_100, 64);
+        let layout = Layout::new(44_100);
+        let w = lowpass(&layout, BlockType::Normal, 64);
         let line = |hz: f32| (hz / (44_100.0 / 2.0 / GRANULE_LINES as f32)) as usize;
         assert_eq!(w[line(10_000.0)], 1.0);
         assert_eq!(w[line(17_100.0)], 0.0);
         assert_eq!(w[GRANULE_LINES - 1], 0.0);
+        // Short blocks cut at the same frequency, in each window.
+        let short = lowpass(&layout, BlockType::Short, 64);
+        for p in layout.partitions(BlockType::Short) {
+            let expected = if p.highest_hz < 15_000.0 {
+                1.0
+            } else if p.lowest_hz > 17_000.0 {
+                0.0
+            } else {
+                continue;
+            };
+            assert!(
+                short[p.lines.clone()].iter().all(|&x| x == expected),
+                "{p:?}"
+            );
+        }
     }
 
     #[test]
