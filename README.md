@@ -34,7 +34,7 @@ cargo run --release --example wav2mp3 -- input.wav output.mp3 [kbps] [--crc]
 - A Xing "Info" tag with frame count and seek table, and optional CRC-16
   frame protection.
 
-About 29× realtime for stereo on one core.
+About 25× realtime for stereo on one core.
 
 ## Delay and gapless playback
 
@@ -47,16 +47,20 @@ the input length.
 
 ## Quality
 
-Measured on synthetic test material at 128 kbit/s, by the share of
-critical bands whose quantization noise exceeds an estimated masking
-threshold (lower is better):
+Measured on synthetic test material by the share of critical bands whose
+quantization noise exceeds an estimated masking threshold (lower is
+better):
 
-| material              | craft-mp3 | LAME  | shine |
-|-----------------------|----------:|------:|------:|
-| band (notes + drums)  |      5.2% |  7.1% | 41.8% |
-| tonal solo            |      0.1% |  0.1% | 34.4% |
-| stereo ambience       |      8.2% |  4.4% | 43.0% |
-| clicks in silence     |     24.3% | 18.6% | 93.6% |
+| material              | kbit/s | craft-mp3 |  LAME | shine |
+|-----------------------|-------:|----------:|------:|------:|
+| band (notes + drums)  |    128 |      2.8% |  7.1% | 41.8% |
+| stereo ambience       |    128 |      4.3% |  4.4% | 43.0% |
+| tonal solo            |    128 |      0.0% |  0.1% | 34.4% |
+| clicks in silence     |    128 |     14.8% | 18.6% | 93.6% |
+| band (notes + drums)  |     64 |     25.9% | 24.7% | 50.6% |
+| stereo ambience       |     64 |     30.6% | 30.3% | 75.6% |
+| tonal solo            |     64 |      6.8% | 10.9% | 37.5% |
+| clicks in silence     |     64 |     23.7% | 28.1% | 96.1% |
 
 That is a rough objective measure, not a listening test.
 

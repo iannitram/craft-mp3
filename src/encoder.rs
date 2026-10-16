@@ -79,6 +79,11 @@ impl std::error::Error for ConfigError {}
 /// the attack detector must see the granule after the frame.
 const LOOKAHEAD: usize = 576;
 
+/// How much the bit pressure moves per doubling of demand over supply, and
+/// its ceiling, in dB.
+const PRESSURE_GAIN_DB: f32 = 6.0;
+const MAX_PRESSURE_DB: f32 = 40.0;
+
 /// Per-channel analysis state.
 #[derive(Clone, Default)]
 struct ChannelState {
@@ -108,6 +113,9 @@ pub struct Encoder {
     /// Block type of the last granule encoded.
     last_block: BlockType,
     info_tag: bool,
+    /// How far, in dB, recent frames have had to relax their noise targets
+    /// to fit the bitrate; see [`Psycho::thresholds`].
+    pressure_db: f32,
     /// Audio frames and bytes (tag included) produced so far.
     frames: u32,
     bytes: u64,
@@ -146,6 +154,7 @@ impl Encoder {
             reservoir: Reservoir::default(),
             last_block: BlockType::Normal,
             info_tag: config.info_tag,
+            pressure_db: 0.0,
             frames: 0,
             bytes: 0,
             next_channel: 0,
@@ -254,8 +263,34 @@ impl Encoder {
             state.pending.drain(..SAMPLES_PER_FRAME);
         }
 
+        // Allowed noise per partition, from the left/right signals: that is
+        // where a listener hears the noise, whichever way it was coded.
+        let mut allowed: Vec<[Vec<f32>; GRANULES]> = xr
+            .iter()
+            .map(|granules| {
+                std::array::from_fn(|gr| {
+                    self.psycho.thresholds(
+                        &self.layout,
+                        &granules[gr],
+                        blocks[gr],
+                        self.pressure_db,
+                    )
+                })
+            })
+            .collect();
+
         let mid_side = channels == 2 && prefers_mid_side(&xr[0], &xr[1]);
         if mid_side {
+            // Noise in M and S reaches each output channel as (nM + nS) / 2,
+            // so holding both under the quieter channel's threshold keeps
+            // both outputs clean.
+            let (left, right) = allowed.split_at_mut(1);
+            for (l, r) in left[0].iter_mut().zip(right[0].iter_mut()) {
+                for (a, b) in l.iter_mut().zip(r.iter_mut()) {
+                    let quieter = a.min(*b);
+                    (*a, *b) = (quieter, quieter);
+                }
+            }
             let (left, right) = xr.split_at_mut(1);
             for (l, r) in left[0]
                 .iter_mut()
@@ -292,10 +327,7 @@ impl Encoder {
         let demands: Vec<Granule> = order
             .iter()
             .map(|&(gr, ch)| {
-                let allowed = self
-                    .psycho
-                    .thresholds(&self.layout, &xr[ch][gr], blocks[gr]);
-                quantize::perceptual(&xr[ch][gr], blocks[gr], &allowed, &self.layout)
+                quantize::perceptual(&xr[ch][gr], blocks[gr], &allowed[ch][gr], &self.layout)
             })
             .collect();
         let demand: u32 = demands.iter().map(Granule::part2_3_length).sum();
@@ -304,6 +336,11 @@ impl Encoder {
         // next frame can't borrow is lost.
         let available = 8 * (main_data_begin + slot_len) as u32;
         let must_use = available.saturating_sub(8 * MAX_MAIN_DATA_BEGIN as u32);
+
+        // Steer the next frame's relaxation towards demand matching supply.
+        let ratio = demand.max(1) as f32 / available.max(1) as f32;
+        self.pressure_db =
+            (self.pressure_db + PRESSURE_GAIN_DB * ratio.log2()).clamp(0.0, MAX_PRESSURE_DB);
 
         let granules: Vec<Granule> = if demand > available || demand < must_use {
             // Share `target` bits in proportion to demand, letting each

@@ -24,6 +24,10 @@ const NOISE_OFFSET_DB: f32 = 5.5;
 /// Spectral flatness, in dB, at which a band counts as fully tonal.
 const TONAL_FLATNESS_DB: f32 = -40.0;
 
+/// Shape of the bit-pressure relaxation over Bark: higher values spare
+/// more of the low bands.
+const PRESSURE_EXPONENT: f64 = 3.0;
+
 /// Level of a full-scale sine in dB SPL.
 const FULL_SCALE_DB_SPL: f64 = 96.0;
 
@@ -55,6 +59,9 @@ struct Model {
     spread: Vec<f32>,
     /// Masking offset for a tonal band, in dB.
     tonal_offset_db: Vec<f32>,
+    /// How strongly each band gives way under bit pressure, from 0 (lowest
+    /// band) to 1 (highest).
+    pressure_weight: Vec<f32>,
 }
 
 impl Model {
@@ -81,10 +88,15 @@ impl Model {
             }
         }
         let tonal_offset_db = centre.iter().map(|z| (14.5 + z) as f32).collect();
+        let pressure_weight = centre
+            .iter()
+            .map(|z| ((z / 24.0).powf(PRESSURE_EXPONENT)).min(1.0) as f32)
+            .collect();
         Self {
             ath,
             spread,
             tonal_offset_db,
+            pressure_weight,
         }
     }
 
@@ -156,12 +168,30 @@ impl Psycho {
 
     /// Allowed noise energy for each partition of a granule (see
     /// [`Layout::partitions`]); `xr` is in bitstream order.
+    ///
+    /// `pressure_db` relaxes the thresholds when bits are short: by up to
+    /// that many dB in the top band and progressively less below, so the
+    /// low bands, where noise is most audible, stay clean longest.
     pub(crate) fn thresholds(
         &self,
         layout: &Layout,
         xr: &[f32; GRANULE_LINES],
         block: BlockType,
+        pressure_db: f32,
     ) -> Vec<f32> {
+        let mut thr = self.unrelaxed(layout, xr, block);
+        let model = if block == BlockType::Short {
+            &self.short
+        } else {
+            &self.long
+        };
+        for (t, p) in thr.iter_mut().zip(layout.partitions(block)) {
+            *t *= 10f32.powf(pressure_db * model.pressure_weight[p.band] / 10.0);
+        }
+        thr
+    }
+
+    fn unrelaxed(&self, layout: &Layout, xr: &[f32; GRANULE_LINES], block: BlockType) -> Vec<f32> {
         let parts = layout.partitions(block);
         if block != BlockType::Short {
             let lines: Vec<&[f32]> = parts.iter().map(|p| &xr[p.lines.clone()]).collect();
@@ -216,10 +246,10 @@ mod tests {
     fn silence_is_held_to_the_threshold_of_hearing() {
         let (layout, p) = setup();
         assert_eq!(
-            p.thresholds(&layout, &[0.0; GRANULE_LINES], BlockType::Normal),
+            p.thresholds(&layout, &[0.0; GRANULE_LINES], BlockType::Normal, 0.0),
             p.long.ath
         );
-        let short = p.thresholds(&layout, &[0.0; GRANULE_LINES], BlockType::Short);
+        let short = p.thresholds(&layout, &[0.0; GRANULE_LINES], BlockType::Short, 0.0);
         for (i, part) in layout.partitions(BlockType::Short).iter().enumerate() {
             assert_eq!(short[i], p.short.ath[part.band]);
         }
@@ -235,7 +265,7 @@ mod tests {
             *x = 0.1;
         }
         let energy: f32 = xr.iter().map(|x| x * x).sum();
-        let thr = p.thresholds(&layout, &xr, BlockType::Normal);
+        let thr = p.thresholds(&layout, &xr, BlockType::Normal, 0.0);
         // A flat band is noise-like: masked 5.5 dB down.
         let expected = energy * 10f32.powf(-NOISE_OFFSET_DB / 10.0);
         assert!(
@@ -272,8 +302,8 @@ mod tests {
         };
         assert!(tonality_of(&noise)[band] < 0.3);
         assert!(tonality_of(&tone)[band] > 0.9);
-        let t_noise = p.thresholds(&layout, &noise, BlockType::Normal)[band];
-        let t_tone = p.thresholds(&layout, &tone, BlockType::Normal)[band];
+        let t_noise = p.thresholds(&layout, &noise, BlockType::Normal, 0.0)[band];
+        let t_tone = p.thresholds(&layout, &tone, BlockType::Normal, 0.0)[band];
         assert!(t_tone < t_noise / 10.0, "tone {t_tone} vs noise {t_noise}");
     }
 
@@ -290,12 +320,46 @@ mod tests {
                 *x = (seed >> 8) as f32 / (1 << 24) as f32 - 0.5;
             }
         }
-        let thr = p.thresholds(&layout, &xr, BlockType::Short);
+        let thr = p.thresholds(&layout, &xr, BlockType::Short, 0.0);
         for (i, part) in parts.iter().enumerate() {
             if part.window == Some(2) {
                 assert!(thr[i] > p.short.ath[part.band] * 10.0);
             } else {
                 assert_eq!(thr[i], p.short.ath[part.band], "quiet windows keep the ATH");
+            }
+        }
+    }
+
+    #[test]
+    fn bit_pressure_relaxes_high_bands_more_than_low_ones() {
+        let (layout, p) = setup();
+        let mut xr = [0.0f32; GRANULE_LINES];
+        for (i, x) in xr.iter_mut().enumerate() {
+            *x = 0.01 * ((i * 7919) % 13) as f32 / 13.0;
+        }
+        for block in [BlockType::Normal, BlockType::Short] {
+            let base = p.thresholds(&layout, &xr, block, 0.0);
+            let relaxed = p.thresholds(&layout, &xr, block, 20.0);
+            let gain_db: Vec<f32> = base
+                .iter()
+                .zip(&relaxed)
+                .map(|(b, r)| 10.0 * (r / b).log10())
+                .collect();
+            let parts = layout.partitions(block);
+            let first = gain_db[0];
+            let last = gain_db[parts.len() - 1];
+            assert!(first < 0.5, "{block:?}: lowest band relaxed by {first} dB");
+            assert!(
+                last > 10.0 && last <= 20.0 + 1e-3,
+                "{block:?}: top band relaxed by {last} dB"
+            );
+            // Never tighter, and rising with frequency.
+            for pair in parts.windows(2).zip(gain_db.windows(2)) {
+                let (bands, g) = pair;
+                assert!(g[0] >= 0.0);
+                if bands[1].band > bands[0].band {
+                    assert!(g[1] >= g[0] - 1e-4);
+                }
             }
         }
     }
