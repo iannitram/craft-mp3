@@ -428,7 +428,7 @@ impl Encoder {
                     mode,
                     ..self.template
                 })
-                .find(|h| 8 * (main_data_begin + h.main_data_len()) as u32 >= demand)
+                .find(|h| 8 * (main_data_begin + h.main_data_len()) as u32 >= demand + 8)
                 .unwrap_or(FrameHeader {
                     mode,
                     ..self.template
@@ -439,7 +439,10 @@ impl Encoder {
 
         // Bits this frame can use, and how many it must use: whatever the
         // next frame can't borrow is lost.
-        let available = 8 * (main_data_begin + slot_len) as u32;
+        // Leave the last byte unused: some decoders (symphonia) reject a
+        // frame whose main data fills its space exactly when a later
+        // granule in it is empty.
+        let available = (8 * (main_data_begin + slot_len) as u32).saturating_sub(8);
         let must_use = available.saturating_sub(8 * self.reservoir.max_begin() as u32);
 
         // Steer the next frame's relaxation towards demand matching supply.
