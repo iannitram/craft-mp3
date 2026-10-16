@@ -25,8 +25,14 @@ pub struct EncoderConfig {
     pub sample_rate: u32,
     /// 1 or 2.
     pub channels: u16,
-    /// One of 32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256 or 320.
+    /// One of 32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256 or 320:
+    /// the bitrate of every frame, or with [`vbr_quality`](Self::vbr_quality)
+    /// the most any frame may use.
     pub bitrate_kbps: u32,
+    /// Encode at a variable bitrate: each frame gets the bits its content
+    /// needs at this quality, from 0 (best, about 245 kbit/s for stereo
+    /// music) to 9 (smallest, about 65 kbit/s).
+    pub vbr_quality: Option<u8>,
     /// Start the stream with a Xing "Info" tag frame giving players the
     /// exact duration and a seek table; see [`Encoder::finish`].
     pub info_tag: bool,
@@ -36,14 +42,24 @@ pub struct EncoderConfig {
 }
 
 impl EncoderConfig {
-    /// Settings with the Info tag enabled.
+    /// Constant-bitrate settings with the Info tag enabled.
     pub fn new(sample_rate: u32, channels: u16, bitrate_kbps: u32) -> Self {
         Self {
             sample_rate,
             channels,
             bitrate_kbps,
+            vbr_quality: None,
             info_tag: true,
             crc: false,
+        }
+    }
+
+    /// Variable-bitrate settings at `quality` (0 best, 9 smallest) with the
+    /// Info tag enabled.
+    pub fn vbr(sample_rate: u32, channels: u16, quality: u8) -> Self {
+        Self {
+            vbr_quality: Some(quality),
+            ..Self::new(sample_rate, channels, 320)
         }
     }
 }
@@ -54,6 +70,7 @@ pub enum ConfigError {
     UnsupportedSampleRate(u32),
     UnsupportedChannels(u16),
     UnsupportedBitrate(u32),
+    UnsupportedVbrQuality(u8),
 }
 
 impl fmt::Display for ConfigError {
@@ -69,6 +86,9 @@ impl fmt::Display for ConfigError {
                 write!(f, "unsupported channel count {n} (expected 1 or 2)")
             }
             Self::UnsupportedBitrate(kbps) => write!(f, "unsupported bitrate {kbps} kbit/s"),
+            Self::UnsupportedVbrQuality(q) => {
+                write!(f, "unsupported VBR quality {q} (expected 0 to 9)")
+            }
         }
     }
 }
@@ -81,6 +101,15 @@ const LOOKAHEAD: usize = 576;
 
 /// Largest input magnitude accepted; larger values are clipped.
 const MAX_SAMPLE: f32 = 1024.0;
+
+/// Typical stereo bitrate for each VBR quality, which sets its lowpass.
+const VBR_TYPICAL_KBPS: [u32; 10] = [245, 225, 190, 175, 165, 130, 115, 100, 85, 65];
+
+/// Noise targets for VBR quality 0, relative to the psychoacoustic model's
+/// thresholds, and how far each quality step relaxes them, in dB. Tuned so
+/// the qualities land near LAME's V0..V9 bitrates on typical material.
+const VBR_BEST_DB: f32 = -13.0;
+const VBR_STEP_DB: f32 = 1.8;
 
 /// How much the bit pressure moves per doubling of demand over supply, and
 /// its ceiling, in dB.
@@ -115,13 +144,16 @@ pub struct Encoder {
     lowpass_short: Box<[f32; GRANULE_LINES]>,
     /// Block type of the last granule encoded.
     last_block: BlockType,
+    /// For VBR, how far the noise targets are relaxed, in dB.
+    vbr_relax_db: Option<f32>,
     info_tag: bool,
+    /// Length of the tag frame, once written.
+    tag_len: usize,
+    /// Length of every audio frame so far, for the tag.
+    frame_lengths: Vec<u32>,
     /// How far, in dB, recent frames have had to relax their noise targets
     /// to fit the bitrate; see [`Psycho::thresholds`].
     pressure_db: f32,
-    /// Audio frames and bytes (tag included) produced so far.
-    frames: u32,
-    bytes: u64,
     /// Channel the next interleaved input sample belongs to.
     next_channel: usize,
 }
@@ -132,6 +164,9 @@ impl Encoder {
             .ok_or(ConfigError::UnsupportedSampleRate(config.sample_rate))?;
         let bitrate = Bitrate::from_kbps(config.bitrate_kbps)
             .ok_or(ConfigError::UnsupportedBitrate(config.bitrate_kbps))?;
+        if let Some(q) = config.vbr_quality.filter(|&q| q > 9) {
+            return Err(ConfigError::UnsupportedVbrQuality(q));
+        }
         let mode = match config.channels {
             1 => ChannelMode::Mono,
             2 => ChannelMode::JointStereo {
@@ -141,7 +176,11 @@ impl Encoder {
             n => return Err(ConfigError::UnsupportedChannels(n)),
         };
         let layout = Layout::new(sample_rate.hz());
-        let kbps_per_channel = config.bitrate_kbps / u32::from(config.channels);
+        let kbps_per_channel = match config.vbr_quality {
+            // The VBR table is for stereo; mono gets half.
+            Some(q) => VBR_TYPICAL_KBPS[usize::from(q)] / 2,
+            None => config.bitrate_kbps / u32::from(config.channels),
+        };
 
         Ok(Self {
             template: FrameHeader {
@@ -156,10 +195,13 @@ impl Encoder {
             channels: vec![ChannelState::default(); usize::from(config.channels)],
             reservoir: Reservoir::default(),
             last_block: BlockType::Normal,
+            vbr_relax_db: config
+                .vbr_quality
+                .map(|q| VBR_BEST_DB + f32::from(q) * VBR_STEP_DB),
             info_tag: config.info_tag,
+            tag_len: 0,
+            frame_lengths: Vec::new(),
             pressure_db: 0.0,
-            frames: 0,
-            bytes: 0,
             next_channel: 0,
         })
     }
@@ -216,9 +258,25 @@ impl Encoder {
         self.encode(&zeros, out);
         self.reservoir.drain_all(out);
         self.info_tag.then(|| {
-            let bytes = u32::try_from(self.bytes).unwrap_or(u32::MAX);
-            info::tag_frame(&self.template, Some((self.frames, bytes)))
+            let counts = info::Counts::from_frame_lengths(self.tag_len, &self.frame_lengths);
+            info::tag_frame(
+                &self.tag_template(),
+                self.vbr_relax_db.is_some(),
+                Some(&counts),
+            )
         })
+    }
+
+    /// The header the tag frame is sized from: for VBR the smallest frame,
+    /// so the tag costs as little as possible.
+    fn tag_template(&self) -> FrameHeader {
+        match self.vbr_relax_db {
+            Some(_) => FrameHeader {
+                bitrate: Bitrate::all().next().unwrap(),
+                ..self.template
+            },
+            None => self.template,
+        }
     }
 
     /// Block types for this frame's two granules, the same for every
@@ -243,10 +301,11 @@ impl Encoder {
     }
 
     fn encode_frame(&mut self, out: &mut Vec<u8>) {
-        if self.info_tag && self.bytes == 0 {
-            let placeholder = info::tag_frame(&self.template, None);
+        if self.info_tag && self.tag_len == 0 {
+            let placeholder =
+                info::tag_frame(&self.tag_template(), self.vbr_relax_db.is_some(), None);
             out.extend_from_slice(placeholder.as_bytes());
-            self.bytes += placeholder.as_bytes().len() as u64;
+            self.tag_len = placeholder.as_bytes().len();
         }
         let channels = self.channels.len();
         let blocks = self.block_types();
@@ -280,12 +339,17 @@ impl Encoder {
             .iter()
             .map(|granules| {
                 std::array::from_fn(|gr| {
-                    self.psycho.thresholds(
+                    let mut thr = self.psycho.thresholds(
                         &self.layout,
                         &granules[gr],
                         blocks[gr],
                         self.pressure_db,
-                    )
+                    );
+                    if let Some(db) = self.vbr_relax_db {
+                        let factor = 10f32.powf(db / 10.0);
+                        thr.iter_mut().for_each(|t| *t *= factor);
+                    }
+                    thr
                 })
             })
             .collect();
@@ -312,23 +376,6 @@ impl Encoder {
             }
         }
 
-        let mode = match self.template.mode {
-            ChannelMode::Mono => ChannelMode::Mono,
-            _ => ChannelMode::JointStereo {
-                mid_side,
-                intensity: false,
-            },
-        };
-        let header = FrameHeader {
-            padding: self.padding.next_padding(),
-            mode,
-            ..self.template
-        };
-        let slot_len = header.main_data_len();
-        let main_data_begin = self.reservoir.main_data_begin();
-        self.frames += 1;
-        self.bytes += header.frame_len() as u64;
-
         // Bitstream order: granule 0's channels, then granule 1's.
         let order: Vec<(usize, usize)> = (0..GRANULES)
             .flat_map(|gr| (0..channels).map(move |ch| (gr, ch)))
@@ -342,6 +389,37 @@ impl Encoder {
             })
             .collect();
         let demand: u32 = demands.iter().map(Granule::part2_3_length).sum();
+
+        let mode = match self.template.mode {
+            ChannelMode::Mono => ChannelMode::Mono,
+            _ => ChannelMode::JointStereo {
+                mid_side,
+                intensity: false,
+            },
+        };
+        let main_data_begin = self.reservoir.main_data_begin();
+        let header = match self.vbr_relax_db {
+            None => FrameHeader {
+                padding: self.padding.next_padding(),
+                mode,
+                ..self.template
+            },
+            // The smallest frame that holds the demand, up to the maximum.
+            Some(_) => Bitrate::all()
+                .filter(|&b| b <= self.template.bitrate)
+                .map(|bitrate| FrameHeader {
+                    bitrate,
+                    mode,
+                    ..self.template
+                })
+                .find(|h| 8 * (main_data_begin + h.main_data_len()) as u32 >= demand)
+                .unwrap_or(FrameHeader {
+                    mode,
+                    ..self.template
+                }),
+        };
+        let slot_len = header.main_data_len();
+        self.frame_lengths.push(header.frame_len() as u32);
 
         // Bits this frame can use, and how many it must use: whatever the
         // next frame can't borrow is lost.

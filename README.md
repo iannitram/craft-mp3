@@ -6,7 +6,7 @@ no `unsafe`.
 ```rust
 use craft_mp3::{Encoder, EncoderConfig};
 
-let mut encoder = Encoder::new(EncoderConfig::new(44_100, 2, 128))?;
+let mut encoder = Encoder::new(EncoderConfig::new(44_100, 2, 128))?; // or ::vbr(44_100, 2, 4)
 let mut mp3 = Vec::new();
 encoder.encode(&interleaved_f32, &mut mp3); // or encode_i16; call as often as you like
 if let Some(tag) = encoder.finish(&mut mp3) {
@@ -17,13 +17,14 @@ if let Some(tag) = encoder.finish(&mut mp3) {
 To convert a WAV file:
 
 ```text
-cargo run --release --example wav2mp3 -- input.wav output.mp3 [kbps] [--crc]
+cargo run --release --example wav2mp3 -- input.wav output.mp3 [kbps | --vbr Q] [--crc]
 ```
 
 ## What it does
 
-- MPEG-1 Layer III at 32, 44.1 and 48 kHz; mono or joint stereo; every
-  constant bitrate from 32 to 320 kbit/s.
+- MPEG-1 Layer III at 32, 44.1 and 48 kHz; mono or joint stereo.
+- Constant bitrate (32 to 320 kbit/s) or variable bitrate at quality 0
+  (best) to 9 (smallest), on a scale close to LAME's V0..V9.
 - The standard's polyphase filterbank and MDCT, with short blocks for
   transients (attack detection with lookahead, so no extra delay).
 - A psychoacoustic model: threshold of hearing, Bark-scale masking, and a
@@ -31,8 +32,8 @@ cargo run --release --example wav2mp3 -- input.wav output.mp3 [kbps] [--crc]
 - Noise shaping with scale factors and subblock gains, a bit reservoir that
   saves bits on easy frames for hard ones, per-frame mid/side stereo, and a
   bitrate-dependent lowpass.
-- A Xing "Info" tag with frame count and seek table, and optional CRC-16
-  frame protection.
+- A Xing/Info tag with frame count and seek table (built from the real
+  frame offsets for VBR), and optional CRC-16 frame protection.
 
 About 25× realtime for stereo on one core.
 
@@ -61,6 +62,18 @@ better):
 | stereo ambience       |     64 |     30.6% | 30.3% | 75.6% |
 | tonal solo            |     64 |      6.8% | 10.9% | 37.5% |
 | clicks in silence     |     64 |     23.7% | 28.1% | 96.1% |
+
+Variable bitrate against LAME's matching V setting, on the band mix:
+
+| quality | craft-mp3 kbit/s | audible | LAME kbit/s | audible |
+|--------:|-----------------:|--------:|------------:|--------:|
+|       0 |              192 |    1.2% |         231 |    0.1% |
+|       2 |              160 |    1.5% |         166 |    2.2% |
+|       5 |              116 |    3.8% |         118 |   12.9% |
+|       9 |               60 |   25.9% |          71 |   23.7% |
+
+Noise-like material costs craft-mp3 more than LAME at the high-quality end
+(stereo ambience at quality 0: 312 against 232 kbit/s).
 
 That is a rough objective measure, not a listening test, and its masking
 estimate resembles the encoder's own model, so it likely flatters

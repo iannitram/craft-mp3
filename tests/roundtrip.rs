@@ -272,3 +272,50 @@ fn hostile_input_still_gives_a_decodable_stream() {
         }
     }
 }
+
+#[test]
+fn vbr_spends_bits_where_the_signal_needs_them() {
+    // Two seconds of silence, then two of the test signal with noise added.
+    let mut input = vec![0.0; 44_100 * 2 * 2];
+    let mut seed = 5u32;
+    input.extend(test_signal(44_100, 2, 2.0).iter().map(|&x| {
+        seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+        x * 0.7 + 0.1 * ((seed >> 8) as f32 / (1 << 24) as f32 - 0.5)
+    }));
+    let size = |quality| encode(EncoderConfig::vbr(44_100, 2, quality), &input).len();
+    let (best, smallest) = (size(0), size(9));
+    assert!(
+        best > smallest * 2,
+        "V0 {best} bytes vs V9 {smallest} bytes"
+    );
+
+    let mp3 = encode(EncoderConfig::vbr(44_100, 2, 4), &input);
+    // A Xing (not Info) tag, after the 32-byte stereo side information.
+    assert_eq!(&mp3[4 + 32..4 + 36], b"Xing");
+    // Frame sizes vary: the silent half uses the smallest frames.
+    let mut sizes = Vec::new();
+    let mut pos = 0;
+    while pos + 4 <= mp3.len() {
+        let header =
+            craft_mp3::header::FrameHeader::parse(mp3[pos..pos + 4].try_into().unwrap()).unwrap();
+        sizes.push(header.frame_len());
+        pos += header.frame_len();
+    }
+    assert_eq!(pos, mp3.len());
+    assert_eq!(sizes[10], 104, "silence takes 32 kbit/s frames");
+    assert!(sizes.iter().max().unwrap() > &300);
+
+    let (output, _, _) = decode(mp3);
+    for ch in 0..2 {
+        let busy_start = 44_100 * 2 * 2;
+        let snr = snr_db(&input[busy_start..], &output[busy_start..], 2, ch);
+        // Noise is coded perceptually, so this only checks the signal is right.
+        assert!(snr > 10.0, "channel {ch}: SNR {snr:.1} dB");
+    }
+}
+
+#[test]
+fn vbr_quality_out_of_range_is_rejected() {
+    let err = Encoder::new(EncoderConfig::vbr(44_100, 2, 10)).err();
+    assert_eq!(err, Some(craft_mp3::ConfigError::UnsupportedVbrQuality(10)));
+}
