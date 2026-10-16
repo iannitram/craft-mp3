@@ -103,6 +103,16 @@ fn pair_bits_with(t: PairTable, values: &[i32]) -> u32 {
     bits
 }
 
+/// The largest magnitude pair table `table` can code; table 0 codes only
+/// zeros, and tables 4 and 14 don't exist.
+pub fn table_max_value(table: usize) -> Option<u32> {
+    match PAIR_TABLES[table] {
+        Some(t) => Some(t.max_value()),
+        None if table == 0 => Some(0),
+        None => None,
+    }
+}
+
 /// Bits needed to code `values` with pair table `table`; table 0 costs nothing.
 pub fn pair_bits(table: usize, values: &[i32]) -> u32 {
     match PAIR_TABLES[table] {

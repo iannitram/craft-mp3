@@ -268,17 +268,34 @@ impl Granule {
     fn search_regions(&mut self, layout: &Layout, bv_end: usize) -> u32 {
         let sfb = layout.long_bounds;
         let bound = |i: usize| sfb[i].min(bv_end);
-        let cost = |a: usize, b: usize| huffman::best_pair_table(&self.ix[bound(a)..bound(b)]).1;
 
-        let mut best = (u32::MAX, 0, 0);
+        // prefix[t][b]: bits to code bands 0..b with table t, or a huge
+        // value once some band holds a magnitude t can't code. Any region
+        // made of whole bands then costs a subtraction per table.
+        const UNUSABLE: u64 = 1 << 40;
+        let mut prefix = [[0u64; LONG_BANDS + 1]; 32];
+        for band in 0..LONG_BANDS {
+            let values = &self.ix[bound(band)..bound(band + 1)];
+            let max = values.iter().map(|v| v.unsigned_abs()).max().unwrap_or(0);
+            for (table, row) in prefix.iter_mut().enumerate() {
+                let bits = match huffman::table_max_value(table) {
+                    Some(limit) if limit >= max => u64::from(huffman::pair_bits(table, values)),
+                    _ => UNUSABLE,
+                };
+                row[band + 1] = row[band] + bits;
+            }
+        }
+        let cost = |a: usize, b: usize| prefix.iter().map(|row| row[b] - row[a]).min().unwrap();
+
+        let mut best = (u64::MAX, 0, 0);
         for r0 in 0..16 {
             let head = cost(0, r0 + 1);
             for r1 in 0..8 {
                 let split = r0 + r1 + 2;
-                if split >= sfb.len() {
+                if split > LONG_BANDS {
                     break;
                 }
-                let bits = head + cost(r0 + 1, split) + cost(split, sfb.len() - 1);
+                let bits = head + cost(r0 + 1, split) + cost(split, LONG_BANDS);
                 if bits < best.0 {
                     best = (bits, r0, r1);
                 }
@@ -292,6 +309,16 @@ impl Granule {
         }
         self.set_regions(layout, best.1, best.2)
     }
+}
+
+/// `n^(4/3)` for every magnitude the Huffman tables can code.
+fn pow43(n: usize) -> f32 {
+    static TABLE: std::sync::OnceLock<Vec<f32>> = std::sync::OnceLock::new();
+    TABLE.get_or_init(|| {
+        (0..=MAX_VALUE)
+            .map(|n| (n as f64).powf(4.0 / 3.0) as f32)
+            .collect()
+    })[n]
 }
 
 /// `|xr|^(3/4)` for each line, computed once per granule.
@@ -405,7 +432,7 @@ fn band_noise(
         if magnitude > MAX_VALUE as f32 {
             return None;
         }
-        let restored = magnitude.floor().powf(4.0 / 3.0) * step;
+        let restored = pow43(magnitude as usize) * step;
         let err = xr[i].abs() - restored;
         noise += err * err;
     }
@@ -454,22 +481,31 @@ pub(crate) fn perceptual(
         .collect();
 
     let ceil_div = |a: i32, b: i32| (a + b - 1) / b;
-    let candidates = [false, true].map(|scale| {
+    // Quantizes with scale factors stepping by 2^0.5 (`scale` false) or 2^1,
+    // and reports whether their range kept any band finer than it needed.
+    let candidate = |scale: bool| -> (Granule, bool) {
         let step = if scale { 4 } else { 2 };
         let mut scalefac = ScaleFactors {
             scale,
             ..Default::default()
         };
-        let gain = if block == BlockType::Short {
+        let (gain, limited) = if block == BlockType::Short {
             // Each window gets a base exponent: as coarse as its bands need,
             // but no coarser than its top band (which has no scale factor)
             // allows, or than scale factors can bring its finest band down to.
+            let mut limited = false;
             let base: [i32; 3] = std::array::from_fn(|w| {
                 let c = |band: usize| coarsest[band * 3 + w];
+                let wanted = (0..SHORT_SCALEFACS)
+                    .map(c)
+                    .max()
+                    .unwrap()
+                    .min(c(SHORT_SCALEFACS));
                 let reach = (0..SHORT_SCALEFACS)
                     .map(|b| c(b) + step * limit(b, 6))
-                    .fold(c(SHORT_SCALEFACS), i32::min);
-                (0..SHORT_SCALEFACS).map(c).max().unwrap().min(reach)
+                    .fold(wanted, i32::min);
+                limited |= reach < wanted;
+                reach
             });
             // Subblock gains take the global gain down to each window's base.
             let coarsest_base = base.iter().copied().max().unwrap();
@@ -484,7 +520,7 @@ pub(crate) fn perceptual(
                     scalefac.short[band][w] = ceil_div(shift, step).min(limit(band, 6)) as u8;
                 }
             }
-            gain
+            (gain, limited)
         } else {
             // The top band has no scale factor, so the global gain can't be
             // coarser than it allows.
@@ -501,21 +537,31 @@ pub(crate) fn perceptual(
                 let shift = (gain - coarsest[band]).max(0);
                 *sf = ceil_div(shift, step).min(limit(band, 11)) as u8;
             }
-            gain
+            (gain, gain < wanted)
         };
         scalefac.compress = scalefac
             .fit_compress(block)
             .expect("scale factors are within the field limits");
-        rate_loop(
-            xr,
-            block,
-            scalefac,
-            layout,
-            MAX_PART23_BITS,
-            gain.max(0) as u32,
+        (
+            rate_loop(
+                xr,
+                block,
+                scalefac,
+                layout,
+                MAX_PART23_BITS,
+                gain.max(0) as u32,
+            ),
+            limited,
         )
-    });
-    let [fine, coarse] = candidates;
+    };
+
+    // Half-power-of-two steps fit the targets more closely; whole powers
+    // reach further, which only helps when the finer kind ran out of range.
+    let (fine, limited) = candidate(false);
+    if !limited {
+        return fine;
+    }
+    let (coarse, _) = candidate(true);
     if coarse.part2_3_length() < fine.part2_3_length() {
         coarse
     } else {
@@ -626,6 +672,38 @@ mod tests {
             let heuristic = g.code(&layout, false);
             let searched = g.code(&layout, true);
             assert!(searched <= heuristic, "{searched} > {heuristic}");
+        }
+    }
+
+    #[test]
+    fn region_search_finds_the_cheapest_split() {
+        let layout = Layout::new(48_000);
+        for seed in 0..10 {
+            let xr = spectrum(seed, 0.4 + seed as f32 * 0.1);
+            let xr34 = magnitudes34(&xr);
+            let mut g = Granule::silent(BlockType::Normal);
+            assert!(quantize(
+                &xr,
+                &xr34,
+                170 + seed,
+                &[0; GRANULE_LINES],
+                &mut g.ix
+            ));
+            let searched = g.code(&layout, true);
+            // Brute force over every legal split.
+            let mut best = u32::MAX;
+            for r0 in 0..16 {
+                for r1 in 0..8 {
+                    if r0 + r1 + 2 <= LONG_BANDS {
+                        best = best.min(g.set_regions(&layout, r0, r1));
+                    }
+                }
+            }
+            let count1 = huffman::quad_bits(
+                g.count1_table_b,
+                &g.ix[g.big_values * 2..g.big_values * 2 + 4 * g.count1],
+            );
+            assert_eq!(searched, best + count1, "seed {seed}");
         }
     }
 
