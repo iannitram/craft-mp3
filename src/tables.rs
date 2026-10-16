@@ -72,3 +72,30 @@ pub(crate) const WINDOW_D_2POW16: [i32; 512] = [
          5,      5,      4,      4,      3,      3,      2,      2,
          2,      2,      1,      1,      1,      1,      1,      1,
 ];
+
+/// Long-block scale-factor band boundaries in frequency lines (Table B.8),
+/// for 44.1, 48 and 32 kHz.
+#[rustfmt::skip]
+pub(crate) const SFB_LONG_44100: [usize; 23] = [
+    0, 4, 8, 12, 16, 20, 24, 30, 36, 44, 52, 62, 74, 90, 110, 134, 162, 196, 238, 288, 342, 418, 576,
+];
+#[rustfmt::skip]
+pub(crate) const SFB_LONG_48000: [usize; 23] = [
+    0, 4, 8, 12, 16, 20, 24, 30, 36, 42, 50, 60, 72, 88, 106, 128, 156, 190, 230, 276, 330, 384, 576,
+];
+#[rustfmt::skip]
+pub(crate) const SFB_LONG_32000: [usize; 23] = [
+    0, 4, 8, 12, 16, 20, 24, 30, 36, 44, 54, 66, 82, 102, 126, 156, 194, 240, 296, 364, 448, 550, 576,
+];
+
+/// Bits per scale factor for bands 0–10 and 11–20, by `scalefac_compress`.
+#[rustfmt::skip]
+pub(crate) const SLEN: [(u32, u32); 16] = [
+    (0, 0), (0, 1), (0, 2), (0, 3), (3, 0), (1, 1), (1, 2), (1, 3),
+    (2, 1), (2, 2), (2, 3), (3, 1), (3, 2), (3, 3), (4, 2), (4, 3),
+];
+
+/// Pre-emphasis added to long-block scale factors when `preflag` is set (Table B.6).
+pub(crate) const PRETAB: [u8; 22] = [
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 3, 3, 3, 2, 0,
+];
