@@ -139,8 +139,8 @@ pub(crate) mod tests {
         let mut synthesis = Synthesis::new();
         let mut output = Vec::with_capacity(input.len());
         let mut bands = [0.0; SUBBANDS];
-        for chunk in input.chunks_exact(SUBBANDS) {
-            analysis.process(chunk.try_into().unwrap(), &mut bands);
+        for chunk in input.as_chunks::<SUBBANDS>().0 {
+            analysis.process(chunk, &mut bands);
             output.extend(synthesis.process(&bands));
         }
         output
@@ -179,8 +179,8 @@ pub(crate) mod tests {
             let mut analysis = AnalysisFilterbank::new();
             let mut energy = [0.0f64; SUBBANDS];
             let mut out = [0.0; SUBBANDS];
-            for (i, chunk) in input.chunks_exact(SUBBANDS).enumerate() {
-                analysis.process(chunk.try_into().unwrap(), &mut out);
+            for (i, chunk) in input.as_chunks::<SUBBANDS>().0.iter().enumerate() {
+                analysis.process(chunk, &mut out);
                 if i >= 20 {
                     for (e, &s) in energy.iter_mut().zip(&out) {
                         *e += f64::from(s) * f64::from(s);

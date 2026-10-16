@@ -91,8 +91,8 @@ const SMALL_TABLES: [&[usize]; 6] = [&[1], &[2, 3], &[5, 6], &[7, 8, 9], &[10, 1
 /// Panics if `t` has no codes or a value is out of the table's range.
 fn pair_bits_with(t: PairTable, values: &[i32]) -> u32 {
     let mut bits = 0;
-    for pair in values.chunks_exact(2) {
-        let (x, y) = (pair[0].unsigned_abs(), pair[1].unsigned_abs());
+    for &[x, y] in values.as_chunks::<2>().0 {
+        let (x, y) = (x.unsigned_abs(), y.unsigned_abs());
         let (cx, cy) = (x.min(15), y.min(15));
         bits += u32::from(t.lens[(cx * t.width + cy) as usize]);
         if t.linbits > 0 {
@@ -162,8 +162,7 @@ pub fn write_pairs(w: &mut BitWriter, table: usize, values: &[i32]) {
         debug_assert!(values.iter().all(|&v| v == 0));
         return;
     };
-    for pair in values.chunks_exact(2) {
-        let (x, y) = (pair[0], pair[1]);
+    for &[x, y] in values.as_chunks::<2>().0 {
         let (ax, ay) = (x.unsigned_abs(), y.unsigned_abs());
         let (cx, cy) = (ax.min(15), ay.min(15));
         let index = (cx * t.width + cy) as usize;
@@ -192,7 +191,9 @@ fn quad_index(quad: &[i32]) -> usize {
 /// with count1 table A (`false`) or B (`true`).
 pub fn quad_bits(table_b: bool, values: &[i32]) -> u32 {
     values
-        .chunks_exact(4)
+        .as_chunks::<4>()
+        .0
+        .iter()
         .map(|quad| {
             let signs = quad.iter().filter(|&&v| v != 0).count() as u32;
             let code = if table_b {
@@ -208,7 +209,7 @@ pub fn quad_bits(table_b: bool, values: &[i32]) -> u32 {
 /// Writes `values` (a multiple of 4 lines, each in `-1..=1`) with count1
 /// table A (`false`) or B (`true`).
 pub fn write_quads(w: &mut BitWriter, table_b: bool, values: &[i32]) {
-    for quad in values.chunks_exact(4) {
+    for quad in values.as_chunks::<4>().0 {
         let index = quad_index(quad);
         if table_b {
             w.write_bits(15 - index as u32, 4);
