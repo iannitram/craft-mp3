@@ -356,6 +356,23 @@ impl FrameHeader {
     }
 }
 
+/// The CRC-16 protecting a frame (2.4.3.1): polynomial 0x8005, initial
+/// value 0xFFFF, over the last two header bytes and the side information.
+pub fn frame_crc(header: &[u8; HEADER_LEN], side_info: &[u8]) -> u16 {
+    let mut crc = 0xFFFFu16;
+    for &byte in header[2..].iter().chain(side_info) {
+        for bit in (0..8).rev() {
+            let input = (byte >> bit) & 1 == 1;
+            let top = crc & 0x8000 != 0;
+            crc <<= 1;
+            if input != top {
+                crc ^= 0x8005;
+            }
+        }
+    }
+    crc
+}
+
 /// Frame length in bytes without the padding byte: `floor(144 * bitrate / sample_rate)`.
 fn unpadded_frame_len(bitrate: Bitrate, sample_rate: SampleRate) -> usize {
     (bytes_per_frame_numerator(bitrate) / u64::from(sample_rate.hz())) as usize
@@ -558,6 +575,15 @@ mod tests {
     fn parse_ignores_mode_extension_outside_joint_stereo() {
         let h = FrameHeader::parse([0xFF, 0xFB, 0x90, 0x30]).unwrap();
         assert_eq!(h.mode, ChannelMode::Stereo);
+    }
+
+    #[test]
+    fn crc_matches_the_standard_algorithm() {
+        // CRC-16/CMS (poly 0x8005, init 0xFFFF, unreflected) of "123456789" is 0xAEE7.
+        let header = [0, 0, b'1', b'2'];
+        assert_eq!(frame_crc(&header, b"3456789"), 0xAEE7);
+        // The first two header bytes (sync, version, layer) are not covered.
+        assert_eq!(frame_crc(&[0xFF, 0xFB, b'1', b'2'], b"3456789"), 0xAEE7);
     }
 
     #[test]

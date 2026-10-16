@@ -1,7 +1,7 @@
 //! Encodes a 16-bit PCM WAV file to MP3.
 //!
 //! ```text
-//! cargo run --release --example wav2mp3 -- input.wav output.mp3 [kbps]
+//! cargo run --release --example wav2mp3 -- input.wav output.mp3 [kbps] [--crc]
 //! ```
 
 use std::error::Error;
@@ -10,16 +10,22 @@ use std::fs;
 use craft_mp3::{Encoder, EncoderConfig};
 
 fn main() -> Result<(), Box<dyn Error>> {
-    let args: Vec<String> = std::env::args().collect();
+    let mut args: Vec<String> = std::env::args().collect();
+    let crc = args.iter().any(|a| a == "--crc");
+    args.retain(|a| a != "--crc");
     let [_, input, output, rest @ ..] = args.as_slice() else {
-        return Err("usage: wav2mp3 <input.wav> <output.mp3> [kbps]".into());
+        return Err("usage: wav2mp3 <input.wav> <output.mp3> [kbps] [--crc]".into());
     };
     let bitrate_kbps = rest.first().map_or(Ok(128), |s| s.parse())?;
 
     let wav = fs::read(input)?;
     let (sample_rate, channels, samples) = parse_wav(&wav)?;
 
-    let mut encoder = Encoder::new(EncoderConfig::new(sample_rate, channels, bitrate_kbps))?;
+    let config = EncoderConfig {
+        crc,
+        ..EncoderConfig::new(sample_rate, channels, bitrate_kbps)
+    };
+    let mut encoder = Encoder::new(config)?;
     let mut mp3 = Vec::new();
     encoder.encode_i16(&samples, &mut mp3);
     if let Some(tag) = encoder.finish(&mut mp3) {

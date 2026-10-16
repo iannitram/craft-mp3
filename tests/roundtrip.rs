@@ -199,3 +199,20 @@ fn transients_do_not_smear_ahead_in_time() {
         assert!(db < -45.0, "pre-echo {db:.1} dB before the click at {at}");
     }
 }
+
+#[test]
+fn crc_protected_streams_decode() {
+    let config = EncoderConfig {
+        crc: true,
+        ..EncoderConfig::new(48_000, 2, 128)
+    };
+    let input = test_signal(48_000, 2, 0.5);
+    let mp3 = encode(config, &input);
+    // The first audio frame, after the Info tag frame, has its protection
+    // bit cleared (0 means a CRC follows).
+    let tag_len = 144 * 128_000 / 48_000;
+    assert_eq!(&mp3[tag_len..tag_len + 2], [0xFF, 0xFA]);
+    let (output, _, _) = decode(mp3);
+    let snr = snr_db(&input, &output, 2, 0);
+    assert!(snr > 30.0, "SNR {snr:.1} dB");
+}

@@ -7,7 +7,7 @@ use crate::attack::AttackDetector;
 use crate::bitstream::BitWriter;
 use crate::filterbank::{AnalysisFilterbank, SUBBANDS};
 use crate::header::{
-    Bitrate, ChannelMode, FrameHeader, PaddingSchedule, SAMPLES_PER_FRAME, SampleRate,
+    Bitrate, ChannelMode, FrameHeader, PaddingSchedule, SAMPLES_PER_FRAME, SampleRate, frame_crc,
 };
 use crate::info::{self, InfoTag};
 use crate::layout::Layout;
@@ -30,6 +30,9 @@ pub struct EncoderConfig {
     /// Start the stream with a Xing "Info" tag frame giving players the
     /// exact duration and a seek table; see [`Encoder::finish`].
     pub info_tag: bool,
+    /// Protect each frame's header and side information with a CRC-16, so
+    /// decoders can detect corruption. Costs 2 bytes per frame.
+    pub crc: bool,
 }
 
 impl EncoderConfig {
@@ -40,6 +43,7 @@ impl EncoderConfig {
             channels,
             bitrate_kbps,
             info_tag: true,
+            crc: false,
         }
     }
 }
@@ -129,7 +133,10 @@ impl Encoder {
         let kbps_per_channel = config.bitrate_kbps / u32::from(config.channels);
 
         Ok(Self {
-            template: FrameHeader::new(bitrate, sample_rate, mode),
+            template: FrameHeader {
+                crc: config.crc,
+                ..FrameHeader::new(bitrate, sample_rate, mode)
+            },
             padding: PaddingSchedule::new(bitrate, sample_rate),
             psycho: Psycho::new(&layout),
             lowpass_long: lowpass(&layout, BlockType::Normal, kbps_per_channel),
@@ -340,13 +347,18 @@ impl Encoder {
         }
         main_data.align_to_byte();
 
-        let mut head = BitWriter::with_capacity(header.frame_len() - slot_len);
-        header.write(&mut head);
-        write_side_info(&mut head, main_data_begin, channels, &granules);
-        debug_assert_eq!(head.as_bytes().len(), header.frame_len() - slot_len);
+        let mut side_info = BitWriter::with_capacity(header.side_info_len());
+        write_side_info(&mut side_info, main_data_begin, channels, &granules);
+        let header_bytes = header.to_bytes();
+        let mut head = Vec::with_capacity(header.frame_len() - slot_len);
+        head.extend_from_slice(&header_bytes);
+        if header.crc {
+            head.extend_from_slice(&frame_crc(&header_bytes, side_info.as_bytes()).to_be_bytes());
+        }
+        head.extend_from_slice(side_info.as_bytes());
+        debug_assert_eq!(head.len(), header.frame_len() - slot_len);
 
-        self.reservoir
-            .push(head.as_bytes(), slot_len, main_data.as_bytes());
+        self.reservoir.push(&head, slot_len, main_data.as_bytes());
         self.reservoir.drain_finished(out);
     }
 }
