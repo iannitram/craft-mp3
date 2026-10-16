@@ -79,6 +79,9 @@ impl std::error::Error for ConfigError {}
 /// the attack detector must see the granule after the frame.
 const LOOKAHEAD: usize = 576;
 
+/// Largest input magnitude accepted; larger values are clipped.
+const MAX_SAMPLE: f32 = 1024.0;
+
 /// How much the bit pressure moves per doubling of demand over supply, and
 /// its ceiling, in dB.
 const PRESSURE_GAIN_DB: f32 = 6.0;
@@ -164,9 +167,17 @@ impl Encoder {
     /// Encodes interleaved samples, nominally in `[-1, 1]`, appending any
     /// completed frames to `out`. Calls may split the input anywhere, even
     /// between the channels of one sample.
+    ///
+    /// NaN is treated as silence and magnitudes beyond 1024 (infinities
+    /// included) are clipped, so no input can break the stream.
     pub fn encode(&mut self, samples: &[f32], out: &mut Vec<u8>) {
         let n = self.channels.len();
         for &sample in samples {
+            let sample = if sample.is_nan() {
+                0.0
+            } else {
+                sample.clamp(-MAX_SAMPLE, MAX_SAMPLE)
+            };
             let ch = self.next_channel;
             let state = &mut self.channels[ch];
             state.pending.push(sample);

@@ -216,3 +216,59 @@ fn crc_protected_streams_decode() {
     let snr = snr_db(&input, &output, 2, 0);
     assert!(snr > 30.0, "SNR {snr:.1} dB");
 }
+
+#[test]
+fn hostile_input_still_gives_a_decodable_stream() {
+    let len = 48_000;
+    let cases: [(&str, Vec<f32>); 6] = [
+        (
+            "NaN",
+            (0..len)
+                .map(|n| if n % 7 == 0 { f32::NAN } else { 0.3 })
+                .collect(),
+        ),
+        (
+            "infinity",
+            (0..len)
+                .map(|n| if n % 1000 == 0 { f32::INFINITY } else { -0.2 })
+                .collect(),
+        ),
+        (
+            "huge",
+            (0..len)
+                .map(|n| if n % 2 == 0 { 1e6 } else { -1e6 })
+                .collect(),
+        ),
+        ("DC", vec![1.0; len]),
+        ("full-scale noise", {
+            let mut seed = 1u32;
+            (0..len)
+                .map(|_| {
+                    seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                    if seed >> 31 == 1 { 1.0 } else { -1.0 }
+                })
+                .collect()
+        }),
+        ("subnormal", vec![1e-40; len]),
+    ];
+    for (name, input) in cases {
+        for (rate, channels, kbps) in [(48_000, 2, 32), (44_100, 1, 320), (32_000, 2, 128)] {
+            let config = EncoderConfig::new(rate, channels, kbps);
+            let mp3 = encode(config, &input);
+            let (output, _, _) = decode(mp3);
+            assert!(
+                output.iter().all(|s| s.is_finite()),
+                "{name} at {rate} Hz {kbps} kbit/s"
+            );
+            if name == "NaN" {
+                // NaN samples become silence; the rest of the signal survives.
+                let mid = &output[output.len() / 3..output.len() / 2];
+                let mean = mid.iter().sum::<f32>() / mid.len() as f32;
+                assert!(
+                    (mean - 0.3 * 6.0 / 7.0).abs() < 0.05,
+                    "NaN case mean {mean}"
+                );
+            }
+        }
+    }
+}
