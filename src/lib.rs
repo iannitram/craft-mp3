@@ -22,8 +22,9 @@
 //! # Ok::<(), craft_mp3::ConfigError>(())
 //! ```
 //!
-//! Supports 32, 44.1 and 48 kHz, mono or joint stereo, every MPEG-1 Layer
-//! III bitrate, and variable bitrate by quality ([`EncoderConfig::vbr`]).
+//! Supports 32, 44.1 and 48 kHz (MPEG-1) and 16, 22.05 and 24 kHz (MPEG-2),
+//! mono or joint stereo, every Layer III bitrate, and variable bitrate by
+//! quality ([`EncoderConfig::vbr`]).
 //! Inside: the standard's polyphase
 //! filterbank and MDCT with window switching for transients, a
 //! psychoacoustic model with tonality-dependent masking, scale-factor noise

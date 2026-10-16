@@ -6,26 +6,27 @@ use std::fmt;
 use crate::attack::AttackDetector;
 use crate::bitstream::BitWriter;
 use crate::filterbank::{AnalysisFilterbank, SUBBANDS};
-use crate::header::{
-    Bitrate, ChannelMode, FrameHeader, PaddingSchedule, SAMPLES_PER_FRAME, SampleRate, frame_crc,
-};
+use crate::header::{Bitrate, ChannelMode, FrameHeader, PaddingSchedule, SampleRate, frame_crc};
 use crate::info::{self, InfoTag};
 use crate::layout::Layout;
 use crate::mdct::{BlockType, GRANULE_LINES, Mdct, SLOTS};
 use crate::psycho::Psycho;
 use crate::quantize::{self, Granule};
-use crate::reservoir::{MAX_MAIN_DATA_BEGIN, Reservoir};
+use crate::reservoir::Reservoir;
 
-const GRANULES: usize = 2;
+/// Granules per frame: two for MPEG-1, one for MPEG-2's low sample rates.
+const MAX_GRANULES: usize = 2;
 
 /// Encoder settings.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct EncoderConfig {
-    /// 32000, 44100 or 48000.
+    /// 32000, 44100 or 48000 (MPEG-1), or 16000, 22050 or 24000 (MPEG-2).
     pub sample_rate: u32,
     /// 1 or 2.
     pub channels: u16,
-    /// One of 32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256 or 320:
+    /// One of 32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256 or 320
+    /// (MPEG-1), or 8, 16, 24, 32, 40, 48, 56, 64, 80, 96, 112, 128, 144 or 160
+    /// (MPEG-2):
     /// the bitrate of every frame, or with [`vbr_quality`](Self::vbr_quality)
     /// the most any frame may use.
     pub bitrate_kbps: u32,
@@ -57,9 +58,11 @@ impl EncoderConfig {
     /// Variable-bitrate settings at `quality` (0 best, 9 smallest) with the
     /// Info tag enabled.
     pub fn vbr(sample_rate: u32, channels: u16, quality: u8) -> Self {
+        // The highest bitrate the sample rate allows.
+        let max_kbps = if sample_rate < 32_000 { 160 } else { 320 };
         Self {
             vbr_quality: Some(quality),
-            ..Self::new(sample_rate, channels, 320)
+            ..Self::new(sample_rate, channels, max_kbps)
         }
     }
 }
@@ -79,7 +82,7 @@ impl fmt::Display for ConfigError {
             Self::UnsupportedSampleRate(hz) => {
                 write!(
                     f,
-                    "unsupported sample rate {hz} Hz (expected 32000, 44100 or 48000)"
+                    "unsupported sample rate {hz} Hz (expected 16000, 22050, 24000, 32000, 44100 or 48000)"
                 )
             }
             Self::UnsupportedChannels(n) => {
@@ -164,6 +167,9 @@ impl Encoder {
             .ok_or(ConfigError::UnsupportedSampleRate(config.sample_rate))?;
         let bitrate = Bitrate::from_kbps(config.bitrate_kbps)
             .ok_or(ConfigError::UnsupportedBitrate(config.bitrate_kbps))?;
+        if !bitrate.is_allowed_at(sample_rate) {
+            return Err(ConfigError::UnsupportedBitrate(config.bitrate_kbps));
+        }
         if let Some(q) = config.vbr_quality.filter(|&q| q > 9) {
             return Err(ConfigError::UnsupportedVbrQuality(q));
         }
@@ -193,7 +199,7 @@ impl Encoder {
             lowpass_short: lowpass(&layout, BlockType::Short, kbps_per_channel),
             layout,
             channels: vec![ChannelState::default(); usize::from(config.channels)],
-            reservoir: Reservoir::default(),
+            reservoir: Reservoir::new(if sample_rate.is_lsf() { 255 } else { 511 }),
             last_block: BlockType::Normal,
             vbr_relax_db: config
                 .vbr_quality
@@ -225,7 +231,7 @@ impl Encoder {
             state.pending.push(sample);
             state.attacks.push(sample);
             self.next_channel = (ch + 1) % n;
-            if ch == n - 1 && state.pending.len() == SAMPLES_PER_FRAME + LOOKAHEAD {
+            if ch == n - 1 && state.pending.len() == self.template.samples() + LOOKAHEAD {
                 self.encode_frame(out);
             }
         }
@@ -252,8 +258,9 @@ impl Encoder {
         // Buffered samples plus the filterbank delay must all reach a frame,
         // and the last frame needs its lookahead too.
         let buffered = self.channels[0].pending.len();
-        let frames = (buffered + ENCODER_DELAY).div_ceil(SAMPLES_PER_FRAME);
-        let silence = frames * SAMPLES_PER_FRAME + LOOKAHEAD - buffered;
+        let frame = self.template.samples();
+        let frames = (buffered + ENCODER_DELAY).div_ceil(frame);
+        let silence = frames * frame + LOOKAHEAD - buffered;
         let zeros = vec![0.0; silence * self.channels.len()];
         self.encode(&zeros, out);
         self.reservoir.drain_all(out);
@@ -272,32 +279,37 @@ impl Encoder {
     fn tag_template(&self) -> FrameHeader {
         match self.vbr_relax_db {
             Some(_) => FrameHeader {
-                bitrate: Bitrate::all().next().unwrap(),
+                bitrate: Bitrate::all(self.template.sample_rate).next().unwrap(),
                 ..self.template
             },
             None => self.template,
         }
     }
 
-    /// Block types for this frame's two granules, the same for every
-    /// channel (mid/side coding needs matching windows).
-    fn block_types(&mut self) -> [BlockType; GRANULES] {
-        let attack = |g: usize| {
-            self.channels.iter().any(|c| {
-                c.attacks
-                    .attack(g)
-                    .expect("lookahead covers the next granule")
+    /// Block types for this frame's granules, the same for every channel
+    /// (mid/side coding needs matching windows).
+    fn block_types(&mut self, granules: usize) -> Vec<BlockType> {
+        // Each granule's type depends on whether the next one has an attack.
+        let attacks: Vec<bool> = (0..=granules)
+            .map(|g| {
+                self.channels.iter().any(|c| {
+                    c.attacks
+                        .attack(g)
+                        .expect("lookahead covers the next granule")
+                })
             })
-        };
-        let (a0, a1, a2) = (attack(0), attack(1), attack(2));
-        let first = BlockType::next(self.last_block, a0, a1);
-        let second = BlockType::next(first, a1, a2);
-        self.last_block = second;
-        for state in &mut self.channels {
-            state.attacks.pop();
-            state.attacks.pop();
+            .collect();
+        let mut blocks = Vec::with_capacity(granules);
+        for g in 0..granules {
+            self.last_block = BlockType::next(self.last_block, attacks[g], attacks[g + 1]);
+            blocks.push(self.last_block);
         }
-        [first, second]
+        for state in &mut self.channels {
+            for _ in 0..granules {
+                state.attacks.pop();
+            }
+        }
+        blocks
     }
 
     fn encode_frame(&mut self, out: &mut Vec<u8>) {
@@ -308,11 +320,13 @@ impl Encoder {
             self.tag_len = placeholder.as_bytes().len();
         }
         let channels = self.channels.len();
-        let blocks = self.block_types();
+        let frame_samples = self.template.samples();
+        let granules = frame_samples / GRANULE_LINES;
+        let blocks = self.block_types(granules);
 
-        let mut xr = vec![[[0.0f32; GRANULE_LINES]; GRANULES]; channels];
+        let mut xr = vec![[[0.0f32; GRANULE_LINES]; MAX_GRANULES]; channels];
         for (ch, state) in self.channels.iter_mut().enumerate() {
-            for (gr, xr) in xr[ch].iter_mut().enumerate() {
+            for (gr, xr) in xr[ch].iter_mut().enumerate().take(granules) {
                 let mut slots = [[0.0f32; SUBBANDS]; SLOTS];
                 for (t, slot) in slots.iter_mut().enumerate() {
                     let start = (gr * SLOTS + t) * SUBBANDS;
@@ -330,31 +344,33 @@ impl Encoder {
                     *x *= w;
                 }
             }
-            state.pending.drain(..SAMPLES_PER_FRAME);
+            state.pending.drain(..frame_samples);
         }
 
         // Allowed noise per partition, from the left/right signals: that is
         // where a listener hears the noise, whichever way it was coded.
-        let mut allowed: Vec<[Vec<f32>; GRANULES]> = xr
+        let mut allowed: Vec<Vec<Vec<f32>>> = xr
             .iter()
-            .map(|granules| {
-                std::array::from_fn(|gr| {
-                    let mut thr = self.psycho.thresholds(
-                        &self.layout,
-                        &granules[gr],
-                        blocks[gr],
-                        self.pressure_db,
-                    );
-                    if let Some(db) = self.vbr_relax_db {
-                        let factor = 10f32.powf(db / 10.0);
-                        thr.iter_mut().for_each(|t| *t *= factor);
-                    }
-                    thr
-                })
+            .map(|channel| {
+                (0..granules)
+                    .map(|gr| {
+                        let mut thr = self.psycho.thresholds(
+                            &self.layout,
+                            &channel[gr],
+                            blocks[gr],
+                            self.pressure_db,
+                        );
+                        if let Some(db) = self.vbr_relax_db {
+                            let factor = 10f32.powf(db / 10.0);
+                            thr.iter_mut().for_each(|t| *t *= factor);
+                        }
+                        thr
+                    })
+                    .collect()
             })
             .collect();
 
-        let mid_side = channels == 2 && prefers_mid_side(&xr[0], &xr[1]);
+        let mid_side = channels == 2 && prefers_mid_side(&xr[0][..granules], &xr[1][..granules]);
         if mid_side {
             // Noise in M and S reaches each output channel as (nM + nS) / 2,
             // so holding both under the quieter channel's threshold keeps
@@ -377,7 +393,7 @@ impl Encoder {
         }
 
         // Bitstream order: granule 0's channels, then granule 1's.
-        let order: Vec<(usize, usize)> = (0..GRANULES)
+        let order: Vec<(usize, usize)> = (0..granules)
             .flat_map(|gr| (0..channels).map(move |ch| (gr, ch)))
             .collect();
 
@@ -405,7 +421,7 @@ impl Encoder {
                 ..self.template
             },
             // The smallest frame that holds the demand, up to the maximum.
-            Some(_) => Bitrate::all()
+            Some(_) => Bitrate::all(self.template.sample_rate)
                 .filter(|&b| b <= self.template.bitrate)
                 .map(|bitrate| FrameHeader {
                     bitrate,
@@ -424,7 +440,7 @@ impl Encoder {
         // Bits this frame can use, and how many it must use: whatever the
         // next frame can't borrow is lost.
         let available = 8 * (main_data_begin + slot_len) as u32;
-        let must_use = available.saturating_sub(8 * MAX_MAIN_DATA_BEGIN as u32);
+        let must_use = available.saturating_sub(8 * self.reservoir.max_begin() as u32);
 
         // Steer the next frame's relaxation towards demand matching supply.
         let ratio = demand.max(1) as f32 / available.max(1) as f32;
@@ -474,7 +490,13 @@ impl Encoder {
         main_data.align_to_byte();
 
         let mut side_info = BitWriter::with_capacity(header.side_info_len());
-        write_side_info(&mut side_info, main_data_begin, channels, &granules);
+        write_side_info(
+            &mut side_info,
+            self.layout.lsf,
+            main_data_begin,
+            channels,
+            &granules,
+        );
         let header_bytes = header.to_bytes();
         let mut head = Vec::with_capacity(header.frame_len() - slot_len);
         head.extend_from_slice(&header_bytes);
@@ -544,10 +566,7 @@ fn lowpass(layout: &Layout, block: BlockType, kbps_per_channel: u32) -> Box<[f32
 /// Whether coding a frame as mid/side should take fewer bits than
 /// left/right: for roughly Gaussian spectra the bits grow with the log of
 /// each channel's energy, so compare the energy products.
-fn prefers_mid_side(
-    left: &[[f32; GRANULE_LINES]; GRANULES],
-    right: &[[f32; GRANULE_LINES]; GRANULES],
-) -> bool {
+fn prefers_mid_side(left: &[[f32; GRANULE_LINES]], right: &[[f32; GRANULE_LINES]]) -> bool {
     let (mut ll, mut rr, mut mm, mut ss) = (0.0f64, 0.0f64, 0.0f64, 0.0f64);
     for (&l, &r) in left.iter().flatten().zip(right.iter().flatten()) {
         let (l, r) = (f64::from(l), f64::from(r));
@@ -563,24 +582,31 @@ fn prefers_mid_side(
 /// synthesis filterbanks plus one granule of MDCT overlap.
 pub const ENCODER_DELAY: usize = 481 + GRANULE_LINES;
 
-/// Writes MPEG-1 side information (2.4.1.7). `granules` is in bitstream
-/// order: granule 0's channels, then granule 1's.
+/// Writes the side information (ISO/IEC 11172-3 2.4.1.7; for the low
+/// sample rates ISO/IEC 13818-3 2.4.1.7). `granules` is in bitstream order:
+/// granule 0's channels, then granule 1's.
 fn write_side_info(
     w: &mut BitWriter,
+    lsf: bool,
     main_data_begin: usize,
     channels: usize,
     granules: &[Granule],
 ) {
-    w.write_bits(main_data_begin as u32, 9);
-    w.write_bits(0, if channels == 1 { 5 } else { 3 }); // private bits
-    for _ in 0..channels {
-        w.write_bits(0, 4); // scfsi: scale factors are always sent
+    if lsf {
+        w.write_bits(main_data_begin as u32, 8);
+        w.write_bits(0, if channels == 1 { 1 } else { 2 }); // private bits
+    } else {
+        w.write_bits(main_data_begin as u32, 9);
+        w.write_bits(0, if channels == 1 { 5 } else { 3 }); // private bits
+        for _ in 0..channels {
+            w.write_bits(0, 4); // scfsi: scale factors are always sent
+        }
     }
     for g in granules {
         w.write_bits(g.part2_3_length(), 12);
         w.write_bits(g.big_values as u32, 9);
         w.write_bits(g.global_gain, 8);
-        w.write_bits(g.scalefac.compress as u32, 4);
+        w.write_bits(g.scalefac.compress as u32, if lsf { 9 } else { 4 });
         let switched = g.block != BlockType::Normal;
         w.write_bit(switched); // window_switching_flag
         if switched {
@@ -599,7 +625,10 @@ fn write_side_info(
             w.write_bits(g.region0_count as u32, 4);
             w.write_bits(g.region1_count as u32, 3);
         }
-        w.write_bit(g.scalefac.preflag);
+        // MPEG-2 has no preflag bit: it is part of scalefac_compress.
+        if !lsf {
+            w.write_bit(g.scalefac.preflag);
+        }
         w.write_bit(g.scalefac.scale);
         w.write_bit(g.count1_table_b);
     }
@@ -608,6 +637,7 @@ fn write_side_info(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::header::SAMPLES_PER_FRAME;
 
     fn config(sample_rate: u32, channels: u16, bitrate_kbps: u32) -> EncoderConfig {
         EncoderConfig {
@@ -619,8 +649,8 @@ mod tests {
     #[test]
     fn rejects_unsupported_configs() {
         assert_eq!(
-            Encoder::new(config(22_050, 2, 128)).err(),
-            Some(ConfigError::UnsupportedSampleRate(22_050))
+            Encoder::new(config(11_025, 2, 128)).err(),
+            Some(ConfigError::UnsupportedSampleRate(11_025))
         );
         assert_eq!(
             Encoder::new(config(44_100, 3, 128)).err(),
@@ -683,7 +713,7 @@ mod tests {
     fn mid_side_is_chosen_for_correlated_channels_only() {
         let mut seed = 5u32;
         let mut noise = || {
-            let mut g = [[0.0f32; GRANULE_LINES]; GRANULES];
+            let mut g = [[0.0f32; GRANULE_LINES]; MAX_GRANULES];
             for x in g.iter_mut().flatten() {
                 seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
                 *x = (seed >> 8) as f32 / (1 << 24) as f32 - 0.5;
@@ -697,7 +727,7 @@ mod tests {
         }
         assert!(prefers_mid_side(&a, &near_a));
         assert!(!prefers_mid_side(&a, &b));
-        assert!(!prefers_mid_side(&a, &[[0.0; GRANULE_LINES]; GRANULES]));
+        assert!(!prefers_mid_side(&a, &[[0.0; GRANULE_LINES]; MAX_GRANULES]));
     }
 
     #[test]

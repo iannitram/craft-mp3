@@ -20,10 +20,6 @@ pub(crate) const MAX_PART23_BITS: u32 = (1 << 12) - 1;
 /// Largest subblock gain (3 bits).
 const MAX_SUBBLOCK_GAIN: i32 = 7;
 
-/// For window-switched granules, region 1 starts at line 36 at every
-/// sample rate and region 2 is empty.
-const SWITCHED_REGION1_START: usize = 36;
-
 /// LAME's region split for long blocks, indexed by the number of
 /// scale-factor bands the big-values region reaches into.
 #[rustfmt::skip]
@@ -46,8 +42,11 @@ pub(crate) struct ScaleFactors {
     pub(crate) short: [[u8; 3]; SHORT_SCALEFACS],
     /// Per-window gain for short blocks, in steps of 2^-2.
     pub(crate) subblock_gain: [u8; 3],
-    /// Index into [`SLEN`]; must be large enough for the scale factors.
+    /// `scalefac_compress`: an index into [`SLEN`] for MPEG-1, or MPEG-2's
+    /// 9-bit packing of four field widths; it must fit the scale factors.
     pub(crate) compress: usize,
+    /// Pack the scale factors the MPEG-2 way.
+    pub(crate) lsf: bool,
     /// Scale factors step by 2^1 instead of 2^0.5.
     pub(crate) scale: bool,
     /// Adds [`PRETAB`] to long-block scale factors.
@@ -55,19 +54,49 @@ pub(crate) struct ScaleFactors {
 }
 
 impl ScaleFactors {
+    /// Field width and count for each group of scale factors, in bitstream
+    /// order (short blocks count each band's three windows).
+    fn fields(&self, block: BlockType) -> [(u32, usize); 4] {
+        let short = block == BlockType::Short;
+        if !self.lsf {
+            let (slen1, slen2) = SLEN[self.compress];
+            return if short {
+                [(slen1, 18), (slen2, 18), (0, 0), (0, 0)]
+            } else {
+                [(slen1, 11), (slen2, 10), (0, 0), (0, 0)]
+            };
+        }
+        // ISO/IEC 13818-3, 2.4.3.2, without intensity stereo; only the
+        // first form (scalefac_compress < 400, no preflag) is produced.
+        let c = self.compress as u32;
+        let slen = [(c >> 4) / 5, (c >> 4) % 5, (c % 16) >> 2, c % 4];
+        let counts = if short { [9, 9, 9, 9] } else { [6, 5, 5, 5] };
+        std::array::from_fn(|i| (slen[i], counts[i]))
+    }
+
     /// Bits the scale factors take in the main data (no scfsi reuse).
     pub(crate) fn bits(&self, block: BlockType) -> u32 {
-        let (slen1, slen2) = SLEN[self.compress];
+        self.fields(block)
+            .iter()
+            .map(|&(slen, count)| slen * count as u32)
+            .sum()
+    }
+
+    /// The scale factors `block` sends, in bitstream order.
+    fn values(&self, block: BlockType) -> Vec<u8> {
         if block == BlockType::Short {
-            18 * slen1 + 18 * slen2
+            self.short.iter().flatten().copied().collect()
         } else {
-            11 * slen1 + 10 * slen2
+            self.long.to_vec()
         }
     }
 
     /// The cheapest `scalefac_compress` whose field widths fit the scale
     /// factors `block` uses.
     pub(crate) fn fit_compress(&self, block: BlockType) -> Option<usize> {
+        if self.lsf {
+            return self.fit_compress_lsf(block);
+        }
         let (low, high) = if block == BlockType::Short {
             let max = |bands: &[[u8; 3]]| bands.iter().flatten().copied().max().unwrap_or(0);
             (max(&self.short[..6]), max(&self.short[6..]))
@@ -87,6 +116,32 @@ impl ScaleFactors {
                 }
                 .bits(block)
             })
+    }
+
+    fn fit_compress_lsf(&self, block: BlockType) -> Option<usize> {
+        debug_assert!(!self.preflag, "MPEG-2 preflag packing is not produced");
+        let values = self.values(block);
+        let counts = if block == BlockType::Short {
+            [9, 9, 9, 9]
+        } else {
+            [6, 5, 5, 5]
+        };
+        let mut slen = [0u32; 4];
+        let mut start = 0;
+        for (i, &count) in counts.iter().enumerate() {
+            let max = values[start..start + count]
+                .iter()
+                .copied()
+                .max()
+                .unwrap_or(0);
+            slen[i] = u32::BITS - u32::from(max).leading_zeros();
+            start += count;
+        }
+        // The first two groups have 5 widths (0..=4), the others 4 (0..=3).
+        if slen[0] > 4 || slen[1] > 4 || slen[2] > 3 || slen[3] > 3 {
+            return None;
+        }
+        Some((((slen[0] * 5 + slen[1]) << 4) + (slen[2] << 2) + slen[3]) as usize)
     }
 
     /// How much, in quarter powers of two, each line is amplified before
@@ -159,16 +214,11 @@ impl Granule {
 
     /// Writes the scale factors and Huffman data.
     pub(crate) fn write_main_data(&self, w: &mut BitWriter, layout: &Layout) {
-        let (slen1, slen2) = SLEN[self.scalefac.compress];
-        if self.block == BlockType::Short {
-            for (band, windows) in self.scalefac.short.iter().enumerate() {
-                for &value in windows {
-                    w.write_bits(u32::from(value), if band < 6 { slen1 } else { slen2 });
-                }
-            }
-        } else {
-            for (band, &value) in self.scalefac.long.iter().enumerate() {
-                w.write_bits(u32::from(value), if band < 11 { slen1 } else { slen2 });
+        let values = self.scalefac.values(self.block);
+        let mut values = values.iter();
+        for (slen, count) in self.scalefac.fields(self.block) {
+            for &value in values.by_ref().take(count) {
+                w.write_bits(u32::from(value), slen);
             }
         }
 
@@ -187,8 +237,15 @@ impl Granule {
     /// Where regions 1 and 2 start, as the decoder computes them.
     fn region_starts(&self, layout: &Layout) -> [usize; 2] {
         let bv_end = self.big_values * 2;
-        if self.block != BlockType::Normal {
-            return [SWITCHED_REGION1_START.min(bv_end), bv_end];
+        // Window-switched granules have an implicit split and no region 2:
+        // after 3 short bands (36 lines) for short blocks, after 8 long
+        // bands for start and stop blocks (36 lines in MPEG-1, 54 in MPEG-2).
+        match self.block {
+            BlockType::Short => return [(3 * layout.short_bounds[3]).min(bv_end), bv_end],
+            BlockType::Start | BlockType::Stop => {
+                return [layout.long_bounds[8].min(bv_end), bv_end];
+            }
+            BlockType::Normal => {}
         }
         let sfb = layout.long_bounds;
         let r1 = sfb[self.region0_count + 1].min(bv_end);
@@ -487,6 +544,7 @@ pub(crate) fn perceptual(
         let step = if scale { 4 } else { 2 };
         let mut scalefac = ScaleFactors {
             scale,
+            lsf: layout.lsf,
             ..Default::default()
         };
         let (gain, limited) = if block == BlockType::Short {

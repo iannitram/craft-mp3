@@ -45,7 +45,7 @@ impl InfoTag {
 /// smallest bitrate (no lower than the stream's) whose frame has room for
 /// the tag.
 fn tag_header(template: &FrameHeader) -> FrameHeader {
-    Bitrate::all()
+    Bitrate::all(template.sample_rate)
         .filter(|&b| b >= template.bitrate)
         .map(|bitrate| FrameHeader {
             bitrate,
@@ -54,7 +54,7 @@ fn tag_header(template: &FrameHeader) -> FrameHeader {
             ..*template
         })
         .find(|h| h.main_data_len() >= TAG_LEN)
-        .expect("a 320 kbit/s frame always has room")
+        .expect("the largest frame always has room")
 }
 
 /// What the finished tag records about the stream.

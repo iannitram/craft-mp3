@@ -115,7 +115,7 @@ fn stereo_44100_at_128_kbps_reconstructs_the_input() {
 
 #[test]
 fn every_sample_rate_and_channel_count_decodes() {
-    for sample_rate in [32_000, 44_100, 48_000] {
+    for sample_rate in [16_000, 22_050, 24_000, 32_000, 44_100, 48_000] {
         for channels in [1, 2] {
             let config = EncoderConfig::new(sample_rate, channels, 160);
             let input = test_signal(sample_rate, channels, 0.5);
@@ -172,31 +172,36 @@ fn silence_and_full_scale_both_decode() {
 fn transients_do_not_smear_ahead_in_time() {
     // Isolated clicks in silence: with long blocks only, quantization noise
     // spreads over the whole 1152-sample window, well before each click.
-    let rate = 44_100usize;
-    let mut input = vec![0.0f32; rate * 2];
-    let clicks = [20_000usize, 45_000, 70_000];
-    for &at in &clicks {
-        for n in 0..1500 {
-            let t = n as f64 / rate as f64;
-            input[at + n] = (0.6 * (-t * 300.0).exp() * (2.0 * PI * 2500.0 * t).sin()) as f32;
+    // MPEG-2's low rates switch windows with different region splits.
+    for (rate, kbps) in [(44_100usize, 64), (22_050, 64)] {
+        let mut input = vec![0.0f32; rate * 2];
+        let clicks = [rate / 2, rate, rate * 3 / 2];
+        for &at in &clicks {
+            for n in 0..1500 {
+                let t = n as f64 / rate as f64;
+                input[at + n] = (0.6 * (-t * 300.0).exp() * (2.0 * PI * 2500.0 * t).sin()) as f32;
+            }
         }
-    }
-    let config = EncoderConfig::new(44_100, 1, 64);
-    let (output, _, _) = decode(encode(config, &input));
+        let config = EncoderConfig::new(rate as u32, 1, kbps);
+        let (output, _, _) = decode(encode(config, &input));
 
-    for &at in &clicks {
-        let energy = |range: std::ops::Range<usize>| -> f64 {
-            range
-                .map(|n| f64::from(output[n + ENCODER_DELAY]).powi(2))
-                .sum()
-        };
-        let click = energy(at..at + 1500);
-        // 300 to 1000 samples before the click: past the filterbank's own
-        // spread, but inside a long window. Long blocks only give about
-        // -25 dB here; short blocks better than -50 dB.
-        let before = energy(at - 1000..at - 300);
-        let db = 10.0 * (before / click).log10();
-        assert!(db < -45.0, "pre-echo {db:.1} dB before the click at {at}");
+        for &at in &clicks {
+            let energy = |range: std::ops::Range<usize>| -> f64 {
+                range
+                    .map(|n| f64::from(output[n + ENCODER_DELAY]).powi(2))
+                    .sum()
+            };
+            let click = energy(at..at + 1500);
+            // 300 to 1000 samples before the click: past the filterbank's own
+            // spread, but inside a long window. Long blocks only give about
+            // -25 dB here; short blocks better than -50 dB.
+            let before = energy(at - 1000..at - 300);
+            let db = 10.0 * (before / click).log10();
+            assert!(
+                db < -45.0,
+                "{rate} Hz: pre-echo {db:.1} dB before the click at {at}"
+            );
+        }
     }
 }
 
@@ -312,6 +317,41 @@ fn vbr_spends_bits_where_the_signal_needs_them() {
         // Noise is coded perceptually, so this only checks the signal is right.
         assert!(snr > 10.0, "channel {ch}: SNR {snr:.1} dB");
     }
+}
+
+#[test]
+fn every_mpeg2_bitrate_decodes_and_quality_rises_with_bitrate() {
+    let input = test_signal(24_000, 1, 0.5);
+    let mut last = f64::NEG_INFINITY;
+    for kbps in [8, 16, 24, 32, 40, 48, 56, 64, 80, 96, 112, 128, 144, 160] {
+        let (output, _, rate) = decode(encode(EncoderConfig::new(24_000, 1, kbps), &input));
+        assert_eq!(rate, 24_000);
+        let snr = snr_db(&input, &output, 1, 0);
+        assert!(
+            snr > last - 1.0,
+            "{kbps} kbit/s: {snr:.1} dB after {last:.1} dB"
+        );
+        last = last.max(snr);
+    }
+    assert!(last > 40.0, "best SNR only {last:.1} dB");
+}
+
+#[test]
+fn mpeg2_vbr_and_bitrate_limits() {
+    let input = test_signal(22_050, 2, 1.0);
+    let (output, channels, rate) = decode(encode(EncoderConfig::vbr(22_050, 2, 2), &input));
+    assert_eq!((channels, rate), (2, 22_050));
+    assert!(snr_db(&input, &output, 2, 0) > 20.0);
+    // 320 kbit/s doesn't exist at the low rates, 8 kbit/s only there.
+    let err = |rate, kbps| Encoder::new(EncoderConfig::new(rate, 2, kbps)).err();
+    assert_eq!(
+        err(22_050, 320),
+        Some(craft_mp3::ConfigError::UnsupportedBitrate(320))
+    );
+    assert_eq!(
+        err(44_100, 8),
+        Some(craft_mp3::ConfigError::UnsupportedBitrate(8))
+    );
 }
 
 #[test]

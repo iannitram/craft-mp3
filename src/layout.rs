@@ -31,6 +31,9 @@ pub(crate) struct Partition {
 
 /// Band layouts for one sample rate.
 pub(crate) struct Layout {
+    /// MPEG-2 low sampling frequency: one granule per frame and its own
+    /// scale-factor packing.
+    pub(crate) lsf: bool,
     pub(crate) long_bounds: &'static [usize; LONG_BANDS + 1],
     pub(crate) short_bounds: &'static [usize; SHORT_BANDS + 1],
     long: Vec<Partition>,
@@ -40,6 +43,9 @@ pub(crate) struct Layout {
 impl Layout {
     pub(crate) fn new(sample_rate: u32) -> Self {
         let (long_bounds, short_bounds) = match sample_rate {
+            16_000 => (&SFB_LONG_22050, &SFB_SHORT_16000),
+            22_050 => (&SFB_LONG_22050, &SFB_SHORT_22050),
+            24_000 => (&SFB_LONG_24000, &SFB_SHORT_24000),
             32_000 => (&SFB_LONG_32000, &SFB_SHORT_32000),
             48_000 => (&SFB_LONG_48000, &SFB_SHORT_48000),
             _ => (&SFB_LONG_44100, &SFB_SHORT_44100),
@@ -80,6 +86,7 @@ impl Layout {
         }
 
         Self {
+            lsf: matches!(sample_rate, 16_000 | 22_050 | 24_000),
             long_bounds,
             short_bounds,
             long,
@@ -122,7 +129,7 @@ mod tests {
 
     #[test]
     fn partitions_tile_the_granule_in_order() {
-        for rate in [32_000, 44_100, 48_000] {
+        for rate in [16_000, 22_050, 24_000, 32_000, 44_100, 48_000] {
             let layout = Layout::new(rate);
             for block in [BlockType::Normal, BlockType::Short] {
                 let parts = layout.partitions(block);

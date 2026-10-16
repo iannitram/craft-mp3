@@ -22,9 +22,11 @@ cargo run --release --example wav2mp3 -- input.wav output.mp3 [kbps | --vbr Q] [
 
 ## What it does
 
-- MPEG-1 Layer III at 32, 44.1 and 48 kHz; mono or joint stereo.
-- Constant bitrate (32 to 320 kbit/s) or variable bitrate at quality 0
-  (best) to 9 (smallest), on a scale close to LAME's V0..V9.
+- Layer III at 32, 44.1 and 48 kHz (MPEG-1) and 16, 22.05 and 24 kHz
+  (MPEG-2); mono or joint stereo.
+- Constant bitrate (32 to 320 kbit/s, or 8 to 160 at the MPEG-2 rates) or
+  variable bitrate at quality 0 (best) to 9 (smallest), on a scale close to
+  LAME's V0..V9.
 - The standard's polyphase filterbank and MDCT, with short blocks for
   transients (attack detection with lookahead, so no extra delay).
 - A psychoacoustic model: threshold of hearing, Bark-scale masking, and a

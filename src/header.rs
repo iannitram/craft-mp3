@@ -22,7 +22,9 @@ use std::fmt;
 
 use crate::bitstream::BitWriter;
 
-/// PCM samples per channel in one Layer III frame.
+/// PCM samples per channel in one MPEG-1 Layer III frame (MPEG-2 frames,
+/// at the low sample rates, hold half as many; see
+/// [`FrameHeader::samples`]).
 pub const SAMPLES_PER_FRAME: usize = 1152;
 
 /// Length of the frame header in bytes.
@@ -33,30 +35,47 @@ pub const CRC_LEN: usize = 2;
 
 const SYNC: u32 = 0x7FF;
 const VERSION_MPEG1: u32 = 0b11;
+const VERSION_MPEG2: u32 = 0b10;
 const LAYER_III: u32 = 0b01;
 
-/// Bitrates in kbit/s for bitrate indices 1 through 14.
-/// Index 0 (free format) and 15 (forbidden) are not supported.
-const BITRATES_KBPS: [u16; 14] = [
+/// Bitrates in kbit/s for bitrate indices 1 through 14, for MPEG-1 and for
+/// MPEG-2 at the low sample rates. Index 0 (free format) and 15
+/// (forbidden) are not supported.
+const MPEG1_KBPS: [u16; 14] = [
     32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320,
 ];
+const MPEG2_KBPS: [u16; 14] = [8, 16, 24, 32, 40, 48, 56, 64, 80, 96, 112, 128, 144, 160];
 
-/// A bitrate allowed in an MPEG-1 Layer III frame header.
+fn bitrate_table(lsf: bool) -> &'static [u16; 14] {
+    if lsf { &MPEG2_KBPS } else { &MPEG1_KBPS }
+}
+
+/// A Layer III bitrate. Which ones a stream may use depends on its sample
+/// rate; see [`Bitrate::all`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Bitrate(u16);
 
 impl Bitrate {
-    /// Every supported bitrate, lowest first.
-    pub fn all() -> impl Iterator<Item = Bitrate> {
-        BITRATES_KBPS.iter().map(|&kbps| Bitrate(kbps))
+    /// Every bitrate a stream at `sample_rate` can use, lowest first.
+    pub fn all(sample_rate: SampleRate) -> impl Iterator<Item = Bitrate> {
+        bitrate_table(sample_rate.is_lsf())
+            .iter()
+            .map(|&kbps| Bitrate(kbps))
     }
 
-    /// Returns the bitrate for `kbps` if Layer III allows it.
+    /// Returns the bitrate for `kbps` if Layer III allows it at some
+    /// sample rate.
     pub fn from_kbps(kbps: u32) -> Option<Self> {
-        BITRATES_KBPS
+        MPEG1_KBPS
             .iter()
+            .chain(&MPEG2_KBPS)
             .find(|&&allowed| u32::from(allowed) == kbps)
             .map(|&allowed| Bitrate(allowed))
+    }
+
+    /// Whether a stream at `sample_rate` can use this bitrate.
+    pub fn is_allowed_at(self, sample_rate: SampleRate) -> bool {
+        bitrate_table(sample_rate.is_lsf()).contains(&self.0)
     }
 
     /// The bitrate in kbit/s.
@@ -69,29 +88,39 @@ impl Bitrate {
         self.kbps() * 1000
     }
 
-    fn index(self) -> u32 {
-        let pos = BITRATES_KBPS.iter().position(|&kbps| kbps == self.0);
-        pos.expect("Bitrate only holds table values") as u32 + 1
+    /// # Panics
+    ///
+    /// Panics if the bitrate isn't allowed for this MPEG version.
+    fn index(self, lsf: bool) -> u32 {
+        let pos = bitrate_table(lsf).iter().position(|&kbps| kbps == self.0);
+        pos.expect("bitrate is not allowed at this sample rate") as u32 + 1
     }
 
-    fn from_index(index: u32) -> Option<Self> {
+    fn from_index(index: u32, lsf: bool) -> Option<Self> {
         let i = usize::try_from(index).ok()?.checked_sub(1)?;
-        BITRATES_KBPS.get(i).map(|&kbps| Bitrate(kbps))
+        bitrate_table(lsf).get(i).map(|&kbps| Bitrate(kbps))
     }
 }
 
-/// A sampling frequency allowed in MPEG-1.
+/// A sampling frequency: MPEG-1's three, or MPEG-2's low sampling
+/// frequencies (LSF), which halve the frame length.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum SampleRate {
+    Hz16000,
+    Hz22050,
+    Hz24000,
     Hz32000,
     Hz44100,
     Hz48000,
 }
 
 impl SampleRate {
-    /// Returns the sample rate for `hz` if MPEG-1 allows it.
+    /// Returns the sample rate for `hz` if MPEG-1 or MPEG-2 allows it.
     pub fn from_hz(hz: u32) -> Option<Self> {
         match hz {
+            16_000 => Some(Self::Hz16000),
+            22_050 => Some(Self::Hz22050),
+            24_000 => Some(Self::Hz24000),
             32_000 => Some(Self::Hz32000),
             44_100 => Some(Self::Hz44100),
             48_000 => Some(Self::Hz48000),
@@ -102,25 +131,36 @@ impl SampleRate {
     /// The sample rate in Hz.
     pub fn hz(self) -> u32 {
         match self {
+            Self::Hz16000 => 16_000,
+            Self::Hz22050 => 22_050,
+            Self::Hz24000 => 24_000,
             Self::Hz32000 => 32_000,
             Self::Hz44100 => 44_100,
             Self::Hz48000 => 48_000,
         }
     }
 
+    /// Whether this is an MPEG-2 low sampling frequency.
+    pub fn is_lsf(self) -> bool {
+        matches!(self, Self::Hz16000 | Self::Hz22050 | Self::Hz24000)
+    }
+
     fn bits(self) -> u32 {
         match self {
-            Self::Hz44100 => 0b00,
-            Self::Hz48000 => 0b01,
-            Self::Hz32000 => 0b10,
+            Self::Hz44100 | Self::Hz22050 => 0b00,
+            Self::Hz48000 | Self::Hz24000 => 0b01,
+            Self::Hz32000 | Self::Hz16000 => 0b10,
         }
     }
 
-    fn from_bits(bits: u32) -> Option<Self> {
-        match bits {
-            0b00 => Some(Self::Hz44100),
-            0b01 => Some(Self::Hz48000),
-            0b10 => Some(Self::Hz32000),
+    fn from_bits(bits: u32, lsf: bool) -> Option<Self> {
+        match (bits, lsf) {
+            (0b00, false) => Some(Self::Hz44100),
+            (0b01, false) => Some(Self::Hz48000),
+            (0b10, false) => Some(Self::Hz32000),
+            (0b00, true) => Some(Self::Hz22050),
+            (0b01, true) => Some(Self::Hz24000),
+            (0b10, true) => Some(Self::Hz16000),
             _ => None,
         }
     }
@@ -216,7 +256,7 @@ impl Emphasis {
 pub enum HeaderError {
     /// The 11-bit sync word is not all ones.
     NoSync,
-    /// Not MPEG-1 (MPEG-2, MPEG-2.5 or the reserved version).
+    /// Neither MPEG-1 nor MPEG-2 (MPEG-2.5 or the reserved version).
     UnsupportedVersion,
     /// Not Layer III.
     UnsupportedLayer,
@@ -232,7 +272,7 @@ impl fmt::Display for HeaderError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
             Self::NoSync => "frame sync word not found",
-            Self::UnsupportedVersion => "not an MPEG-1 frame",
+            Self::UnsupportedVersion => "not an MPEG-1 or MPEG-2 frame",
             Self::UnsupportedLayer => "not a Layer III frame",
             Self::UnsupportedBitrate => "free-format or forbidden bitrate index",
             Self::ReservedSampleRate => "reserved sampling frequency index",
@@ -243,7 +283,7 @@ impl fmt::Display for HeaderError {
 
 impl std::error::Error for HeaderError {}
 
-/// One MPEG-1 Layer III frame header.
+/// One Layer III frame header (MPEG-1, or MPEG-2 at the low sample rates).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct FrameHeader {
     pub bitrate: Bitrate,
@@ -278,11 +318,12 @@ impl FrameHeader {
     /// Appends the 32 header bits to `w`.
     pub(crate) fn write(&self, w: &mut BitWriter) {
         w.write_bits(SYNC, 11);
-        w.write_bits(VERSION_MPEG1, 2);
+        let lsf = self.sample_rate.is_lsf();
+        w.write_bits(if lsf { VERSION_MPEG2 } else { VERSION_MPEG1 }, 2);
         w.write_bits(LAYER_III, 2);
         // The protection bit is inverted: 0 means a CRC follows.
         w.write_bit(!self.crc);
-        w.write_bits(self.bitrate.index(), 4);
+        w.write_bits(self.bitrate.index(lsf), 4);
         w.write_bits(self.sample_rate.bits(), 2);
         w.write_bit(self.padding);
         w.write_bit(self.private);
@@ -312,15 +353,18 @@ impl FrameHeader {
         if field(21, 11) != SYNC {
             return Err(HeaderError::NoSync);
         }
-        if field(19, 2) != VERSION_MPEG1 {
-            return Err(HeaderError::UnsupportedVersion);
-        }
+        let lsf = match field(19, 2) {
+            VERSION_MPEG1 => false,
+            VERSION_MPEG2 => true,
+            _ => return Err(HeaderError::UnsupportedVersion),
+        };
         if field(17, 2) != LAYER_III {
             return Err(HeaderError::UnsupportedLayer);
         }
-        let bitrate = Bitrate::from_index(field(12, 4)).ok_or(HeaderError::UnsupportedBitrate)?;
+        let bitrate =
+            Bitrate::from_index(field(12, 4), lsf).ok_or(HeaderError::UnsupportedBitrate)?;
         let sample_rate =
-            SampleRate::from_bits(field(10, 2)).ok_or(HeaderError::ReservedSampleRate)?;
+            SampleRate::from_bits(field(10, 2), lsf).ok_or(HeaderError::ReservedSampleRate)?;
         let emphasis = Emphasis::from_bits(field(0, 2)).ok_or(HeaderError::ReservedEmphasis)?;
 
         Ok(Self {
@@ -341,11 +385,23 @@ impl FrameHeader {
         unpadded_frame_len(self.bitrate, self.sample_rate) + usize::from(self.padding)
     }
 
+    /// PCM samples per channel in the frame: two granules of 576 for
+    /// MPEG-1, one for MPEG-2.
+    pub fn samples(&self) -> usize {
+        if self.sample_rate.is_lsf() {
+            SAMPLES_PER_FRAME / 2
+        } else {
+            SAMPLES_PER_FRAME
+        }
+    }
+
     /// Length of the Layer III side information in bytes.
     pub fn side_info_len(&self) -> usize {
-        match self.mode.channels() {
-            1 => 17,
-            _ => 32,
+        match (self.sample_rate.is_lsf(), self.mode.channels()) {
+            (false, 1) => 17,
+            (false, _) => 32,
+            (true, 1) => 9,
+            (true, _) => 17,
         }
     }
 
@@ -373,14 +429,16 @@ pub fn frame_crc(header: &[u8; HEADER_LEN], side_info: &[u8]) -> u16 {
     crc
 }
 
-/// Frame length in bytes without the padding byte: `floor(144 * bitrate / sample_rate)`.
+/// Frame length in bytes without the padding byte:
+/// `floor(144 * bitrate / sample_rate)`, or 72 for MPEG-2.
 fn unpadded_frame_len(bitrate: Bitrate, sample_rate: SampleRate) -> usize {
-    (bytes_per_frame_numerator(bitrate) / u64::from(sample_rate.hz())) as usize
+    (bytes_per_frame_numerator(bitrate, sample_rate) / u64::from(sample_rate.hz())) as usize
 }
 
-/// `144 * bitrate`, i.e. 1152 samples / 8 bits per byte, times bit/s.
-fn bytes_per_frame_numerator(bitrate: Bitrate) -> u64 {
-    144 * u64::from(bitrate.bps())
+/// Samples per frame / 8 bits per byte, times bit/s.
+fn bytes_per_frame_numerator(bitrate: Bitrate, sample_rate: SampleRate) -> u64 {
+    let factor = if sample_rate.is_lsf() { 72 } else { 144 };
+    factor * u64::from(bitrate.bps())
 }
 
 /// Decides which frames carry the padding byte so the stream averages exactly
@@ -398,10 +456,10 @@ pub struct PaddingSchedule {
 }
 
 impl PaddingSchedule {
-    pub fn new(bitrate: Bitrate, sample_rate: SampleRate) -> Self {
-        let sample_rate = u64::from(sample_rate.hz());
+    pub fn new(bitrate: Bitrate, rate: SampleRate) -> Self {
+        let sample_rate = u64::from(rate.hz());
         Self {
-            remainder: bytes_per_frame_numerator(bitrate) % sample_rate,
+            remainder: bytes_per_frame_numerator(bitrate, rate) % sample_rate,
             sample_rate,
             owed: 0,
         }
@@ -429,24 +487,42 @@ mod tests {
 
     #[test]
     fn bitrate_table() {
-        assert_eq!(Bitrate::all().count(), 14);
-        assert_eq!(Bitrate::from_kbps(128).unwrap().index(), 9);
-        assert_eq!(Bitrate::from_kbps(32).unwrap().index(), 1);
-        assert_eq!(Bitrate::from_kbps(320).unwrap().index(), 14);
+        assert_eq!(Bitrate::all(SampleRate::Hz44100).count(), 14);
+        assert_eq!(Bitrate::from_kbps(128).unwrap().index(false), 9);
+        assert_eq!(Bitrate::from_kbps(32).unwrap().index(false), 1);
+        assert_eq!(Bitrate::from_kbps(320).unwrap().index(false), 14);
         assert_eq!(Bitrate::from_kbps(0), None);
-        assert_eq!(Bitrate::from_kbps(8), None);
-        assert_eq!(Bitrate::from_kbps(144), None);
-        assert_eq!(Bitrate::from_index(0), None);
-        assert_eq!(Bitrate::from_index(15), None);
-        for b in Bitrate::all() {
-            assert_eq!(Bitrate::from_index(b.index()), Some(b));
+        assert_eq!(Bitrate::from_kbps(100), None);
+        assert_eq!(Bitrate::from_index(0, false), None);
+        assert_eq!(Bitrate::from_index(15, false), None);
+        for lsf_rate in [SampleRate::Hz44100, SampleRate::Hz22050] {
+            let lsf = lsf_rate.is_lsf();
+            for b in Bitrate::all(lsf_rate) {
+                assert!(b.is_allowed_at(lsf_rate));
+                assert_eq!(Bitrate::from_index(b.index(lsf), lsf), Some(b));
+            }
         }
+        // MPEG-2 has its own table: 8..160, with 144.
+        assert_eq!(Bitrate::from_kbps(144).unwrap().index(true), 13);
+        assert_eq!(Bitrate::from_kbps(8).unwrap().index(true), 1);
+        assert!(
+            !Bitrate::from_kbps(8)
+                .unwrap()
+                .is_allowed_at(SampleRate::Hz44100)
+        );
+        assert!(
+            !Bitrate::from_kbps(320)
+                .unwrap()
+                .is_allowed_at(SampleRate::Hz24000)
+        );
     }
 
     #[test]
     fn sample_rates() {
         assert_eq!(SampleRate::from_hz(44_100), Some(SampleRate::Hz44100));
-        assert_eq!(SampleRate::from_hz(22_050), None);
+        assert_eq!(SampleRate::from_hz(22_050), Some(SampleRate::Hz22050));
+        assert_eq!(SampleRate::from_hz(11_025), None);
+        assert!(SampleRate::Hz16000.is_lsf() && !SampleRate::Hz32000.is_lsf());
         assert_eq!(SampleRate::Hz48000.hz(), 48_000);
     }
 
@@ -484,6 +560,27 @@ mod tests {
     }
 
     #[test]
+    fn mpeg2_low_sample_rate_headers() {
+        // 64 kbit/s, 22.05 kHz, mono: version bits 10, bitrate index 8 in
+        // the MPEG-2 table.
+        let h = FrameHeader::new(kbps(64), SampleRate::Hz22050, ChannelMode::Mono);
+        assert_eq!(h.to_bytes(), [0xFF, 0xF3, 0x80, 0xC0]);
+        assert_eq!(FrameHeader::parse(h.to_bytes()), Ok(h));
+        assert_eq!(h.samples(), 576);
+        assert_eq!(h.frame_len(), 72 * 64_000 / 22_050);
+        assert_eq!(h.side_info_len(), 9);
+        let stereo = FrameHeader {
+            mode: ChannelMode::Stereo,
+            ..h
+        };
+        assert_eq!(stereo.side_info_len(), 17);
+        assert_eq!(
+            FrameHeader::new(kbps(160), SampleRate::Hz16000, ChannelMode::Mono).frame_len(),
+            720
+        );
+    }
+
+    #[test]
     fn write_appends_to_existing_bits() {
         let h = FrameHeader::new(kbps(128), SampleRate::Hz44100, ChannelMode::Stereo);
         let mut w = BitWriter::new();
@@ -516,13 +613,16 @@ mod tests {
             ChannelMode::Mono,
         ];
         let rates = [
+            SampleRate::Hz16000,
+            SampleRate::Hz22050,
+            SampleRate::Hz24000,
             SampleRate::Hz32000,
             SampleRate::Hz44100,
             SampleRate::Hz48000,
         ];
         let emphases = [Emphasis::None, Emphasis::Us50_15, Emphasis::CcittJ17];
-        for bitrate in Bitrate::all() {
-            for sample_rate in rates {
+        for sample_rate in rates {
+            for bitrate in Bitrate::all(sample_rate) {
                 for mode in modes {
                     for emphasis in emphases {
                         for flags in 0..32u8 {
@@ -554,7 +654,7 @@ mod tests {
         let cases: [([u8; 4], HeaderError); 9] = [
             ([0xFF, 0x1B, 0x90, 0x00], NoSync),
             ([0x00, 0x00, 0x00, 0x00], NoSync),
-            ([0xFF, 0xF3, 0x90, 0x00], UnsupportedVersion), // MPEG-2
+            ([0xFF, 0xEB, 0x90, 0x00], UnsupportedVersion), // reserved version
             ([0xFF, 0xE3, 0x90, 0x00], UnsupportedVersion), // MPEG-2.5
             ([0xFF, 0xFD, 0x90, 0x00], UnsupportedLayer),   // Layer II
             ([0xFF, 0xF9, 0x90, 0x00], UnsupportedLayer),   // reserved layer
@@ -628,12 +728,13 @@ mod tests {
 
     #[test]
     fn padding_keeps_the_exact_average_bitrate() {
-        for bitrate in Bitrate::all() {
-            for rate in [
-                SampleRate::Hz32000,
-                SampleRate::Hz44100,
-                SampleRate::Hz48000,
-            ] {
+        for rate in [
+            SampleRate::Hz22050,
+            SampleRate::Hz32000,
+            SampleRate::Hz44100,
+            SampleRate::Hz48000,
+        ] {
+            for bitrate in Bitrate::all(rate) {
                 let mut schedule = PaddingSchedule::new(bitrate, rate);
                 let mut total = 0u64;
                 for n in 1..=2_000u64 {
@@ -643,7 +744,8 @@ mod tests {
                         ..FrameHeader::new(bitrate, rate, ChannelMode::Stereo)
                     };
                     total += h.frame_len() as u64;
-                    let exact = n * 144 * u64::from(bitrate.bps()) / u64::from(rate.hz());
+                    let factor = if rate.is_lsf() { 72 } else { 144 };
+                    let exact = n * factor * u64::from(bitrate.bps()) / u64::from(rate.hz());
                     assert_eq!(total, exact, "{bitrate:?} at {rate:?}, frame {n}");
                 }
             }
@@ -652,8 +754,8 @@ mod tests {
 
     #[test]
     fn no_padding_at_32_and_48_khz() {
-        for bitrate in Bitrate::all() {
-            for rate in [SampleRate::Hz32000, SampleRate::Hz48000] {
+        for rate in [SampleRate::Hz32000, SampleRate::Hz48000] {
+            for bitrate in Bitrate::all(rate) {
                 let mut schedule = PaddingSchedule::new(bitrate, rate);
                 assert!((0..100).all(|_| !schedule.next_padding()));
             }

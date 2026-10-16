@@ -8,7 +8,8 @@
 
 use std::collections::VecDeque;
 
-/// Largest `main_data_begin` the 9-bit field can express.
+/// Largest `main_data_begin` the 9-bit MPEG-1 field can express (MPEG-2
+/// uses 8 bits).
 pub(crate) const MAX_MAIN_DATA_BEGIN: usize = (1 << 9) - 1;
 
 struct PendingFrame {
@@ -26,8 +27,9 @@ impl PendingFrame {
 }
 
 /// Places frames and their main data, and releases finished frames.
-#[derive(Default)]
 pub(crate) struct Reservoir {
+    /// Largest `main_data_begin` the stream's side information allows.
+    max_begin: usize,
     pending: VecDeque<PendingFrame>,
     /// Main-data stream position just past the last slot.
     end: usize,
@@ -35,10 +37,31 @@ pub(crate) struct Reservoir {
     written: usize,
 }
 
+impl Default for Reservoir {
+    fn default() -> Self {
+        Self::new(MAX_MAIN_DATA_BEGIN)
+    }
+}
+
 impl Reservoir {
+    pub(crate) fn new(max_begin: usize) -> Self {
+        Self {
+            max_begin,
+            pending: VecDeque::new(),
+            end: 0,
+            written: 0,
+        }
+    }
+
+    /// Largest `main_data_begin` the stream allows: how far back any
+    /// frame's main data can reach.
+    pub(crate) fn max_begin(&self) -> usize {
+        self.max_begin
+    }
+
     /// Bytes of earlier slots the next frame's main data may start in.
     pub(crate) fn main_data_begin(&self) -> usize {
-        (self.end - self.written).min(MAX_MAIN_DATA_BEGIN)
+        (self.end - self.written).min(self.max_begin)
     }
 
     /// Adds a frame. `head` is the header, optional CRC and side information,
@@ -146,6 +169,14 @@ mod tests {
         // 511 bytes back from the end reaches into frame 3 only.
         assert_eq!(out.len(), 602);
         assert_eq!(r.main_data_begin(), MAX_MAIN_DATA_BEGIN);
+    }
+
+    #[test]
+    fn a_smaller_limit_caps_how_far_back_main_data_reaches() {
+        let mut r = Reservoir::new(255);
+        r.push(&[1], 300, &[]);
+        r.push(&[2], 300, &[]);
+        assert_eq!(r.main_data_begin(), 255);
     }
 
     #[test]

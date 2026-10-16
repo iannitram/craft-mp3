@@ -108,3 +108,21 @@ pub(crate) const SFB_SHORT_48000: [usize; 14] =
     [0, 4, 8, 12, 16, 22, 28, 38, 50, 64, 80, 100, 126, 192];
 pub(crate) const SFB_SHORT_32000: [usize; 14] =
     [0, 4, 8, 12, 16, 22, 30, 42, 58, 78, 104, 138, 180, 192];
+
+/// MPEG-2 low-sampling-frequency band boundaries (ISO/IEC 13818-3,
+/// Table B.2): long blocks for 22.05/16 kHz and 24 kHz, and short blocks
+/// per window for 22.05, 24 and 16 kHz.
+#[rustfmt::skip]
+pub(crate) const SFB_LONG_22050: [usize; 23] = [
+    0, 6, 12, 18, 24, 30, 36, 44, 54, 66, 80, 96, 116, 140, 168, 200, 238, 284, 336, 396, 464, 522, 576,
+];
+#[rustfmt::skip]
+pub(crate) const SFB_LONG_24000: [usize; 23] = [
+    0, 6, 12, 18, 24, 30, 36, 44, 54, 66, 80, 96, 114, 136, 162, 194, 232, 278, 332, 394, 464, 540, 576,
+];
+pub(crate) const SFB_SHORT_22050: [usize; 14] =
+    [0, 4, 8, 12, 18, 24, 32, 42, 56, 74, 100, 132, 174, 192];
+pub(crate) const SFB_SHORT_24000: [usize; 14] =
+    [0, 4, 8, 12, 18, 26, 36, 48, 62, 80, 104, 136, 180, 192];
+pub(crate) const SFB_SHORT_16000: [usize; 14] =
+    [0, 4, 8, 12, 18, 26, 36, 48, 62, 80, 104, 134, 174, 192];
