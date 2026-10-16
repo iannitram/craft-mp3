@@ -9,6 +9,7 @@ pub mod header;
 mod huffman;
 mod huffman_tables;
 pub mod mdct;
+mod psycho;
 mod quantize;
 mod reservoir;
 mod tables;

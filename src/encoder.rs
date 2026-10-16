@@ -1,5 +1,6 @@
 //! The public encoder: PCM in, MPEG-1 Layer III frames out.
 
+use std::f32::consts::FRAC_1_SQRT_2;
 use std::fmt;
 
 use crate::bitstream::BitWriter;
@@ -8,8 +9,9 @@ use crate::header::{
     Bitrate, ChannelMode, FrameHeader, PaddingSchedule, SAMPLES_PER_FRAME, SampleRate,
 };
 use crate::mdct::{GRANULE_LINES, Mdct, SLOTS};
-use crate::quantize::{self, Granule, ScaleFactors, SfbBounds};
-use crate::reservoir::Reservoir;
+use crate::psycho::Psycho;
+use crate::quantize::{self, Granule, SfbBounds};
+use crate::reservoir::{MAX_MAIN_DATA_BEGIN, Reservoir};
 use crate::tables::{SFB_LONG_32000, SFB_LONG_44100, SFB_LONG_48000};
 
 const GRANULES: usize = 2;
@@ -72,6 +74,10 @@ pub struct Encoder {
     sfb: &'static SfbBounds,
     channels: Vec<ChannelState>,
     reservoir: Reservoir,
+    psycho: Psycho,
+    /// Per-line gain applied before quantization: 1 in the passband, 0 above
+    /// the bitrate's cutoff.
+    lowpass: Box<[f32; GRANULE_LINES]>,
     /// Channel the next interleaved input sample belongs to.
     next_channel: usize,
 }
@@ -84,7 +90,10 @@ impl Encoder {
             .ok_or(ConfigError::UnsupportedBitrate(config.bitrate_kbps))?;
         let mode = match config.channels {
             1 => ChannelMode::Mono,
-            2 => ChannelMode::Stereo,
+            2 => ChannelMode::JointStereo {
+                mid_side: false,
+                intensity: false,
+            },
             n => return Err(ConfigError::UnsupportedChannels(n)),
         };
         let sfb = match sample_rate {
@@ -99,6 +108,11 @@ impl Encoder {
             sfb,
             channels: vec![ChannelState::default(); usize::from(config.channels)],
             reservoir: Reservoir::default(),
+            psycho: Psycho::new(config.sample_rate, sfb),
+            lowpass: lowpass(
+                config.sample_rate,
+                config.bitrate_kbps / u32::from(config.channels),
+            ),
             next_channel: 0,
         })
     }
@@ -159,28 +173,90 @@ impl Encoder {
             state.pending.clear();
         }
 
+        for granules in &mut xr {
+            for xr in granules.iter_mut() {
+                for (x, w) in xr.iter_mut().zip(self.lowpass.iter()) {
+                    *x *= w;
+                }
+            }
+        }
+
+        let mid_side = channels == 2 && prefers_mid_side(&xr[0], &xr[1]);
+        if mid_side {
+            let (left, right) = xr.split_at_mut(1);
+            for (l, r) in left[0]
+                .iter_mut()
+                .flatten()
+                .zip(right[0].iter_mut().flatten())
+            {
+                (*l, *r) = ((*l + *r) * FRAC_1_SQRT_2, (*l - *r) * FRAC_1_SQRT_2);
+            }
+        }
+
+        let mode = match self.template.mode {
+            ChannelMode::Mono => ChannelMode::Mono,
+            _ => ChannelMode::JointStereo {
+                mid_side,
+                intensity: false,
+            },
+        };
         let header = FrameHeader {
             padding: self.padding.next_padding(),
+            mode,
             ..self.template
         };
         let slot_len = header.main_data_len();
         let main_data_begin = self.reservoir.main_data_begin();
 
-        // Share the frame's bits, reservoir included, evenly over what is
-        // left; savings in one granule carry to the next.
-        let units = GRANULES * channels;
-        let mut remaining = 8 * (main_data_begin + slot_len) as u32;
-        let mut granules = Vec::with_capacity(units);
-        for (unit, (gr, ch)) in (0..GRANULES)
+        // Bitstream order: granule 0's channels, then granule 1's.
+        let order: Vec<(usize, usize)> = (0..GRANULES)
             .flat_map(|gr| (0..channels).map(move |ch| (gr, ch)))
-            .enumerate()
-        {
-            let budget = remaining / (units - unit) as u32;
-            let granule =
-                quantize::rate_loop(&xr[ch][gr], ScaleFactors::default(), self.sfb, budget);
-            remaining -= granule.part2_3_length();
-            granules.push(granule);
-        }
+            .collect();
+
+        // What each granule needs to keep its noise inaudible.
+        let demands: Vec<Granule> = order
+            .iter()
+            .map(|&(gr, ch)| {
+                let allowed = self.psycho.thresholds(&xr[ch][gr]);
+                quantize::perceptual(&xr[ch][gr], &allowed, self.sfb)
+            })
+            .collect();
+        let demand: u32 = demands.iter().map(Granule::part2_3_length).sum();
+
+        // Bits this frame can use, and how many it must use: whatever the
+        // next frame can't borrow is lost.
+        let available = 8 * (main_data_begin + slot_len) as u32;
+        let must_use = available.saturating_sub(8 * MAX_MAIN_DATA_BEGIN as u32);
+
+        let granules: Vec<Granule> = if demand > available || demand < must_use {
+            // Share `target` bits in proportion to demand, letting each
+            // granule's leftovers flow to the ones after it.
+            let target = if demand > available {
+                available
+            } else {
+                must_use
+            };
+            let finer_allowed = demand < must_use;
+            let mut remaining = target;
+            let mut remaining_weight: u32 = demands.iter().map(|d| d.part2_3_length().max(1)).sum();
+            order
+                .iter()
+                .zip(&demands)
+                .map(|(&(gr, ch), d)| {
+                    let weight = d.part2_3_length().max(1);
+                    let budget = (u64::from(remaining) * u64::from(weight)
+                        / u64::from(remaining_weight)) as u32;
+                    let min_gain = if finer_allowed { 0 } else { d.global_gain };
+                    let g =
+                        quantize::rate_loop(&xr[ch][gr], d.scalefac, self.sfb, budget, min_gain);
+                    remaining = remaining.saturating_sub(g.part2_3_length());
+                    remaining_weight -= weight;
+                    g
+                })
+                .collect()
+        } else {
+            demands
+        };
 
         let mut main_data = BitWriter::with_capacity(main_data_begin + slot_len);
         for granule in &granules {
@@ -197,6 +273,72 @@ impl Encoder {
             .push(head.as_bytes(), slot_len, main_data.as_bytes());
         self.reservoir.drain_finished(out);
     }
+}
+
+/// Lowpass cutoff in Hz for a per-channel bitrate, following LAME's choices
+/// for joint stereo (which spends about half the bitrate on each channel).
+fn cutoff_hz(kbps_per_channel: u32) -> f32 {
+    const TABLE: [(u32, f32); 16] = [
+        (16, 5_500.0),
+        (20, 7_000.0),
+        (24, 7_500.0),
+        (28, 10_000.0),
+        (32, 11_000.0),
+        (40, 13_500.0),
+        (48, 15_100.0),
+        (56, 15_600.0),
+        (64, 17_000.0),
+        (80, 17_500.0),
+        (96, 18_600.0),
+        (112, 19_400.0),
+        (128, 19_700.0),
+        (160, 20_500.0),
+        (192, 21_000.0),
+        (u32::MAX, 22_000.0),
+    ];
+    let upper = TABLE
+        .iter()
+        .position(|&(k, _)| kbps_per_channel <= k)
+        .unwrap();
+    if upper == 0 {
+        return TABLE[0].1;
+    }
+    let ((k0, f0), (k1, f1)) = (TABLE[upper - 1], TABLE[upper]);
+    if k1 == u32::MAX {
+        return f1;
+    }
+    f0 + (f1 - f0) * (kbps_per_channel - k0) as f32 / (k1 - k0) as f32
+}
+
+/// Per-line weights: a short linear taper ending at the cutoff.
+fn lowpass(sample_rate: u32, kbps_per_channel: u32) -> Box<[f32; GRANULE_LINES]> {
+    let line_hz = sample_rate as f32 / 2.0 / GRANULE_LINES as f32;
+    let stop = cutoff_hz(kbps_per_channel);
+    let start = stop * 0.94;
+    let mut weights = Box::new([0.0; GRANULE_LINES]);
+    for (line, w) in weights.iter_mut().enumerate() {
+        let f = (line as f32 + 0.5) * line_hz;
+        *w = ((stop - f) / (stop - start)).clamp(0.0, 1.0);
+    }
+    weights
+}
+
+/// Whether coding a frame as mid/side should take fewer bits than
+/// left/right: for roughly Gaussian spectra the bits grow with the log of
+/// each channel's energy, so compare the energy products.
+fn prefers_mid_side(
+    left: &[[f32; GRANULE_LINES]; GRANULES],
+    right: &[[f32; GRANULE_LINES]; GRANULES],
+) -> bool {
+    let (mut ll, mut rr, mut mm, mut ss) = (0.0f64, 0.0f64, 0.0f64, 0.0f64);
+    for (&l, &r) in left.iter().flatten().zip(right.iter().flatten()) {
+        let (l, r) = (f64::from(l), f64::from(r));
+        ll += l * l;
+        rr += r * r;
+        mm += (l + r) * (l + r) / 2.0;
+        ss += (l - r) * (l - r) / 2.0;
+    }
+    ll * rr > 0.0 && mm * ss < 0.5 * ll * rr
 }
 
 /// Samples by which decoded output lags the input: the analysis and
@@ -284,6 +426,43 @@ mod tests {
         assert_eq!(frames, (44_100 + ENCODER_DELAY).div_ceil(SAMPLES_PER_FRAME));
         let exact = frames as u64 * 144 * 128_000 / 44_100;
         assert_eq!(out.len() as u64, exact);
+    }
+
+    #[test]
+    fn mid_side_is_chosen_for_correlated_channels_only() {
+        let mut seed = 5u32;
+        let mut noise = || {
+            let mut g = [[0.0f32; GRANULE_LINES]; GRANULES];
+            for x in g.iter_mut().flatten() {
+                seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                *x = (seed >> 8) as f32 / (1 << 24) as f32 - 0.5;
+            }
+            g
+        };
+        let (a, b) = (noise(), noise());
+        let mut near_a = a;
+        for (x, y) in near_a.iter_mut().flatten().zip(b.iter().flatten()) {
+            *x += 0.1 * y;
+        }
+        assert!(prefers_mid_side(&a, &near_a));
+        assert!(!prefers_mid_side(&a, &b));
+        assert!(!prefers_mid_side(&a, &[[0.0; GRANULE_LINES]; GRANULES]));
+    }
+
+    #[test]
+    fn lowpass_cutoff_rises_with_bitrate_and_zeroes_the_top() {
+        let mut last = 0.0;
+        for kbps in [16, 24, 32, 48, 64, 96, 128, 160, 320] {
+            let f = cutoff_hz(kbps);
+            assert!(f >= last, "{kbps}: {f} < {last}");
+            last = f;
+        }
+        assert_eq!(cutoff_hz(64), 17_000.0);
+        let w = lowpass(44_100, 64);
+        let line = |hz: f32| (hz / (44_100.0 / 2.0 / GRANULE_LINES as f32)) as usize;
+        assert_eq!(w[line(10_000.0)], 1.0);
+        assert_eq!(w[line(17_100.0)], 0.0);
+        assert_eq!(w[GRANULE_LINES - 1], 0.0);
     }
 
     #[test]

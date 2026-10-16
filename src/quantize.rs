@@ -43,10 +43,6 @@ impl ScaleFactors {
     }
 
     /// The smallest `scalefac_compress` whose field widths fit `values`.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "used once scale factors are chosen")
-    )]
     pub(crate) fn fit_compress(values: &[u8; SCALEFAC_BANDS]) -> Option<usize> {
         let max_low = values[..11].iter().copied().max().unwrap_or(0);
         let max_high = values[11..].iter().copied().max().unwrap_or(0);
@@ -269,22 +265,25 @@ fn quantize(
     true
 }
 
-/// Quantizes a granule with the finest step size whose Huffman data fits in
-/// `max_bits` (scale-factor bits included).
+/// Quantizes a granule with the finest step size, no finer than `min_gain`,
+/// whose Huffman data fits in `max_bits` (scale-factor bits included).
 pub(crate) fn rate_loop(
     xr: &[f32; GRANULE_LINES],
     scalefac: ScaleFactors,
     sfb: &SfbBounds,
     max_bits: u32,
+    min_gain: u32,
 ) -> Granule {
+    let max_bits = max_bits.min(MAX_PART23_BITS);
+    if max_bits < scalefac.bits() {
+        return rate_loop(xr, ScaleFactors::default(), sfb, max_bits, min_gain);
+    }
     let xr34 = magnitudes34(xr);
     let mut granule = Granule {
         scalefac,
         ..Granule::silent()
     };
-    let part3_budget = max_bits
-        .min(MAX_PART23_BITS)
-        .saturating_sub(scalefac.bits());
+    let part3_budget = max_bits - scalefac.bits();
 
     let try_gain = |gain: u32, granule: &mut Granule, search: bool| -> Option<u32> {
         granule.global_gain = gain;
@@ -295,7 +294,7 @@ pub(crate) fn rate_loop(
     };
 
     // Smallest gain (finest quantization) that fits; bits fall as gain rises.
-    let (mut lo, mut hi) = (0u32, 255u32);
+    let (mut lo, mut hi) = (min_gain.min(255), 255u32);
     while lo < hi {
         let mid = (lo + hi) / 2;
         if try_gain(mid, &mut granule, false).is_some() {
@@ -309,13 +308,111 @@ pub(crate) fn rate_loop(
     let mut gain = lo;
     while try_gain(gain, &mut granule, true).is_none() {
         if gain == 255 {
-            let mut silent = Granule::silent();
-            silent.scalefac = scalefac;
-            return silent;
+            return Granule::silent();
         }
         gain += 1;
     }
     granule
+}
+
+/// Quantization noise energy in lines `range` at band exponent `exponent`
+/// (global gain minus the band's scale-factor shift), or `None` if a value
+/// would exceed the Huffman range.
+fn band_noise(
+    xr: &[f32; GRANULE_LINES],
+    xr34: &[f32; GRANULE_LINES],
+    exponent: i32,
+    range: std::ops::Range<usize>,
+) -> Option<f32> {
+    let q = exponent - 210;
+    let gain = (-0.1875 * q as f32).exp2();
+    let step = (0.25 * q as f32).exp2();
+    let mut noise = 0.0;
+    for i in range {
+        let magnitude = xr34[i] * gain + 0.4054;
+        if magnitude > MAX_VALUE as f32 {
+            return None;
+        }
+        let restored = (magnitude.floor()).powf(4.0 / 3.0) * step;
+        let err = xr[i].abs() - restored;
+        noise += err * err;
+    }
+    Some(noise)
+}
+
+/// Quantizes a granule so that every band's noise stays under `allowed`,
+/// using scale factors to give each band its own step size, and as coarse
+/// a step as that allows. The result's bit count is the granule's demand.
+pub(crate) fn perceptual(
+    xr: &[f32; GRANULE_LINES],
+    allowed: &[f32; 22],
+    sfb: &SfbBounds,
+) -> Granule {
+    let xr34 = magnitudes34(xr);
+
+    // The coarsest exponent each band tolerates.
+    let mut coarsest = [255i32; 22];
+    for (band, c) in coarsest.iter_mut().enumerate() {
+        let range = sfb[band]..sfb[band + 1];
+        let ok =
+            |e: i32| band_noise(xr, &xr34, e, range.clone()).is_none_or(|n| n <= allowed[band]);
+        if ok(255) {
+            continue;
+        }
+        let (mut lo, mut hi) = (0, 255);
+        // Invariant: ok(lo) (or nothing is), !ok(hi).
+        if !ok(lo) {
+            *c = 0;
+            continue;
+        }
+        while hi - lo > 1 {
+            let mid = (lo + hi) / 2;
+            if ok(mid) {
+                lo = mid;
+            } else {
+                hi = mid;
+            }
+        }
+        *c = lo;
+    }
+
+    // The global gain is the coarsest any band needs, but the top band has
+    // no scale factor, so it can't be finer than that band allows.
+    let wanted = coarsest[..SCALEFAC_BANDS]
+        .iter()
+        .copied()
+        .max()
+        .unwrap()
+        .min(coarsest[SCALEFAC_BANDS]);
+
+    let candidates = [false, true].map(|scale| {
+        let step = if scale { 4 } else { 2 };
+        // Scale factors are at most 15 in bands 0-10 and 7 in 11-20.
+        let limit = |band: usize| if band < 11 { 15 } else { 7 };
+        let gain = (0..SCALEFAC_BANDS)
+            .map(|b| coarsest[b] + step * limit(b))
+            .fold(wanted, i32::min);
+        let mut values = [0u8; SCALEFAC_BANDS];
+        for (b, v) in values.iter_mut().enumerate() {
+            let shift = (gain - coarsest[b]).max(0);
+            *v = ((shift + step - 1) / step) as u8;
+        }
+        let compress =
+            ScaleFactors::fit_compress(&values).expect("values are within the field limits");
+        let scalefac = ScaleFactors {
+            values,
+            compress,
+            scale,
+            preflag: false,
+        };
+        rate_loop(xr, scalefac, sfb, MAX_PART23_BITS, gain.max(0) as u32)
+    });
+    let [fine, coarse] = candidates;
+    if coarse.part2_3_length() < fine.part2_3_length() {
+        coarse
+    } else {
+        fine
+    }
 }
 
 #[cfg(test)]
@@ -339,7 +436,7 @@ mod tests {
     fn rate_loop_respects_the_budget_and_uses_most_of_it() {
         for budget in [200, 800, 1500, 3000, 4095] {
             let xr = spectrum(9, 0.5);
-            let g = rate_loop(&xr, ScaleFactors::default(), &SFB_LONG_44100, budget);
+            let g = rate_loop(&xr, ScaleFactors::default(), &SFB_LONG_44100, budget, 0);
             assert!(
                 g.part2_3_length() <= budget,
                 "{} > {budget}",
@@ -360,6 +457,7 @@ mod tests {
             ScaleFactors::default(),
             &SFB_LONG_44100,
             1000,
+            0,
         );
         assert_eq!(g.part2_3_length(), 0);
         assert_eq!((g.big_values, g.count1), (0, 0));
@@ -376,7 +474,7 @@ mod tests {
             compress: ScaleFactors::fit_compress(&values).unwrap(),
             ..Default::default()
         };
-        let g = rate_loop(&xr, sf, &SFB_LONG_44100, 2500);
+        let g = rate_loop(&xr, sf, &SFB_LONG_44100, 2500, 0);
         let mut w = BitWriter::new();
         g.write_main_data(&mut w, &SFB_LONG_44100);
         assert_eq!(w.bit_len() as u32, g.part2_3_length());
@@ -385,7 +483,7 @@ mod tests {
     #[test]
     fn quantization_round_trips_within_half_a_step() {
         let xr = spectrum(5, 0.3);
-        let g = rate_loop(&xr, ScaleFactors::default(), &SFB_LONG_44100, 4095);
+        let g = rate_loop(&xr, ScaleFactors::default(), &SFB_LONG_44100, 4095, 0);
         let step = (0.25 * (g.global_gain as f32 - 210.0)).exp2();
         for (&x, &q) in xr.iter().zip(&g.ix) {
             let restored = (q.unsigned_abs() as f32).powf(4.0 / 3.0) * step * (q.signum() as f32);
