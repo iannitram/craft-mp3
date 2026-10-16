@@ -276,7 +276,7 @@ impl FrameHeader {
     }
 
     /// Appends the 32 header bits to `w`.
-    pub fn write(&self, w: &mut BitWriter) {
+    pub(crate) fn write(&self, w: &mut BitWriter) {
         w.write_bits(SYNC, 11);
         w.write_bits(VERSION_MPEG1, 2);
         w.write_bits(LAYER_III, 2);

@@ -14,6 +14,7 @@ pub struct BitWriter {
 
 impl BitWriter {
     /// Creates an empty writer.
+    #[cfg(test)]
     pub fn new() -> Self {
         Self::default()
     }
@@ -60,6 +61,7 @@ impl BitWriter {
     }
 
     /// Total number of bits written so far.
+    #[cfg(test)]
     pub fn bit_len(&self) -> usize {
         match self.used {
             0 => self.bytes.len() * 8,
@@ -68,6 +70,7 @@ impl BitWriter {
     }
 
     /// Whether the next bit written will start a new byte.
+    #[cfg(test)]
     pub fn is_byte_aligned(&self) -> bool {
         self.used == 0
     }
