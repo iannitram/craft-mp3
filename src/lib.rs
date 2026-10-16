@@ -3,4 +3,6 @@
 //! The encoder is built up module by module, each with its own tests.
 
 pub mod bitstream;
+pub mod filterbank;
 pub mod header;
+mod tables;
