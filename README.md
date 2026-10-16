@@ -8,7 +8,7 @@ use craft_mp3::{Encoder, EncoderConfig};
 
 let mut encoder = Encoder::new(EncoderConfig::new(44_100, 2, 128))?; // or ::vbr(44_100, 2, 4)
 let mut mp3 = Vec::new();
-encoder.encode(&interleaved_f32, &mut mp3); // or encode_i16; call as often as you like
+encoder.encode(&interleaved_f32, &mut mp3); // or encode_i16 / encode_planar; call as often as you like
 if let Some(tag) = encoder.finish(&mut mp3) {
     tag.write_to(&mut mp3); // exact duration and seek table for players
 }

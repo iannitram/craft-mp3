@@ -237,6 +237,32 @@ impl Encoder {
         }
     }
 
+    /// Encodes one slice per channel (all the same length); see
+    /// [`Encoder::encode`].
+    ///
+    /// # Panics
+    ///
+    /// Panics if the number of slices isn't the channel count, the slices
+    /// differ in length, or interleaved input left a partial set of
+    /// channels pending.
+    pub fn encode_planar(&mut self, channels: &[&[f32]], out: &mut Vec<u8>) {
+        assert_eq!(channels.len(), self.channels.len(), "one slice per channel");
+        let len = channels[0].len();
+        assert!(
+            channels.iter().all(|c| c.len() == len),
+            "channel slices differ in length"
+        );
+        assert_eq!(
+            self.next_channel, 0,
+            "a partial set of interleaved channels is pending"
+        );
+        let mut interleaved = Vec::with_capacity(len * channels.len());
+        for i in 0..len {
+            interleaved.extend(channels.iter().map(|c| c[i]));
+        }
+        self.encode(&interleaved, out);
+    }
+
     /// Encodes interleaved 16-bit samples; see [`Encoder::encode`].
     pub fn encode_i16(&mut self, samples: &[i16], out: &mut Vec<u8>) {
         let scaled: Vec<f32> = samples.iter().map(|&s| f32::from(s) / 32768.0).collect();
@@ -763,6 +789,29 @@ mod tests {
                 "{p:?}"
             );
         }
+    }
+
+    #[test]
+    fn planar_input_matches_interleaved() {
+        let left: Vec<f32> = (0..5000).map(|i| (i as f32 * 0.01).sin() * 0.5).collect();
+        let right: Vec<f32> = (0..5000).map(|i| (i as f32 * 0.023).cos() * 0.3).collect();
+        let interleaved: Vec<f32> = left
+            .iter()
+            .zip(&right)
+            .flat_map(|(&l, &r)| [l, r])
+            .collect();
+
+        let mut a = Encoder::new(config(44_100, 2, 128)).unwrap();
+        let mut out_a = Vec::new();
+        a.encode(&interleaved, &mut out_a);
+        a.finish(&mut out_a);
+
+        let mut b = Encoder::new(config(44_100, 2, 128)).unwrap();
+        let mut out_b = Vec::new();
+        b.encode_planar(&[&left[..2000], &right[..2000]], &mut out_b);
+        b.encode_planar(&[&left[2000..], &right[2000..]], &mut out_b);
+        b.finish(&mut out_b);
+        assert!(out_a == out_b);
     }
 
     #[test]
