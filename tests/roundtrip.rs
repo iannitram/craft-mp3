@@ -58,7 +58,9 @@ fn encode(config: EncoderConfig, input: &[f32]) -> Vec<u8> {
     for chunk in input.chunks(1000 * usize::from(config.channels) + 1) {
         encoder.encode(chunk, &mut mp3);
     }
-    encoder.finish(&mut mp3);
+    if let Some(tag) = encoder.finish(&mut mp3) {
+        tag.write_to(&mut mp3);
+    }
     mp3
 }
 
@@ -96,11 +98,7 @@ fn snr_db(input: &[f32], output: &[f32], channels: usize, channel: usize) -> f64
 
 #[test]
 fn stereo_44100_at_128_kbps_reconstructs_the_input() {
-    let config = EncoderConfig {
-        sample_rate: 44_100,
-        channels: 2,
-        bitrate_kbps: 128,
-    };
+    let config = EncoderConfig::new(44_100, 2, 128);
     let input = test_signal(44_100, 2, 2.0);
     let (output, channels, rate) = decode(encode(config, &input));
 
@@ -119,11 +117,7 @@ fn stereo_44100_at_128_kbps_reconstructs_the_input() {
 fn every_sample_rate_and_channel_count_decodes() {
     for sample_rate in [32_000, 44_100, 48_000] {
         for channels in [1, 2] {
-            let config = EncoderConfig {
-                sample_rate,
-                channels,
-                bitrate_kbps: 160,
-            };
+            let config = EncoderConfig::new(sample_rate, channels, 160);
             let input = test_signal(sample_rate, channels, 0.5);
             let (output, got_channels, got_rate) = decode(encode(config, &input));
             assert_eq!(
@@ -146,11 +140,7 @@ fn every_bitrate_decodes_and_quality_rises_with_bitrate() {
     for kbps in [
         32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320,
     ] {
-        let config = EncoderConfig {
-            sample_rate: 48_000,
-            channels: 1,
-            bitrate_kbps: kbps,
-        };
+        let config = EncoderConfig::new(48_000, 1, kbps);
         let (output, _, _) = decode(encode(config, &input));
         let snr = snr_db(&input, &output, 1, 0);
         // Allow small dips between neighbouring rates.
@@ -165,11 +155,7 @@ fn every_bitrate_decodes_and_quality_rises_with_bitrate() {
 
 #[test]
 fn silence_and_full_scale_both_decode() {
-    let config = EncoderConfig {
-        sample_rate: 44_100,
-        channels: 2,
-        bitrate_kbps: 128,
-    };
+    let config = EncoderConfig::new(44_100, 2, 128);
 
     let (output, _, _) = decode(encode(config, &vec![0.0; 44_100]));
     assert!(output.iter().all(|&s| s.abs() < 1e-6));
@@ -195,11 +181,7 @@ fn transients_do_not_smear_ahead_in_time() {
             input[at + n] = (0.6 * (-t * 300.0).exp() * (2.0 * PI * 2500.0 * t).sin()) as f32;
         }
     }
-    let config = EncoderConfig {
-        sample_rate: 44_100,
-        channels: 1,
-        bitrate_kbps: 64,
-    };
+    let config = EncoderConfig::new(44_100, 1, 64);
     let (output, _, _) = decode(encode(config, &input));
 
     for &at in &clicks {

@@ -9,6 +9,7 @@ use crate::filterbank::{AnalysisFilterbank, SUBBANDS};
 use crate::header::{
     Bitrate, ChannelMode, FrameHeader, PaddingSchedule, SAMPLES_PER_FRAME, SampleRate,
 };
+use crate::info::{self, InfoTag};
 use crate::layout::Layout;
 use crate::mdct::{BlockType, GRANULE_LINES, Mdct, SLOTS};
 use crate::psycho::Psycho;
@@ -26,6 +27,21 @@ pub struct EncoderConfig {
     pub channels: u16,
     /// One of 32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256 or 320.
     pub bitrate_kbps: u32,
+    /// Start the stream with a Xing "Info" tag frame giving players the
+    /// exact duration and a seek table; see [`Encoder::finish`].
+    pub info_tag: bool,
+}
+
+impl EncoderConfig {
+    /// Settings with the Info tag enabled.
+    pub fn new(sample_rate: u32, channels: u16, bitrate_kbps: u32) -> Self {
+        Self {
+            sample_rate,
+            channels,
+            bitrate_kbps,
+            info_tag: true,
+        }
+    }
 }
 
 /// Why an [`EncoderConfig`] was rejected.
@@ -87,6 +103,10 @@ pub struct Encoder {
     lowpass_short: Box<[f32; GRANULE_LINES]>,
     /// Block type of the last granule encoded.
     last_block: BlockType,
+    info_tag: bool,
+    /// Audio frames and bytes (tag included) produced so far.
+    frames: u32,
+    bytes: u64,
     /// Channel the next interleaved input sample belongs to.
     next_channel: usize,
 }
@@ -118,6 +138,9 @@ impl Encoder {
             channels: vec![ChannelState::default(); usize::from(config.channels)],
             reservoir: Reservoir::default(),
             last_block: BlockType::Normal,
+            info_tag: config.info_tag,
+            frames: 0,
+            bytes: 0,
             next_channel: 0,
         })
     }
@@ -147,7 +170,12 @@ impl Encoder {
 
     /// Pads the input with silence so every sample reaches a frame, and
     /// writes the remaining frames.
-    pub fn finish(mut self, out: &mut Vec<u8>) {
+    ///
+    /// With [`EncoderConfig::info_tag`], the stream began with a placeholder
+    /// tag frame and this returns the finished one: write it over the start
+    /// of the stream ([`InfoTag::write_to`]) so players get the exact
+    /// duration. The stream plays correctly either way.
+    pub fn finish(mut self, out: &mut Vec<u8>) -> Option<InfoTag> {
         // Complete a partial set of channels with silence.
         while self.next_channel != 0 {
             self.encode(&[0.0], out);
@@ -160,6 +188,10 @@ impl Encoder {
         let zeros = vec![0.0; silence * self.channels.len()];
         self.encode(&zeros, out);
         self.reservoir.drain_all(out);
+        self.info_tag.then(|| {
+            let bytes = u32::try_from(self.bytes).unwrap_or(u32::MAX);
+            info::tag_frame(&self.template, Some((self.frames, bytes)))
+        })
     }
 
     /// Block types for this frame's two granules, the same for every
@@ -184,6 +216,11 @@ impl Encoder {
     }
 
     fn encode_frame(&mut self, out: &mut Vec<u8>) {
+        if self.info_tag && self.bytes == 0 {
+            let placeholder = info::tag_frame(&self.template, None);
+            out.extend_from_slice(placeholder.as_bytes());
+            self.bytes += placeholder.as_bytes().len() as u64;
+        }
         let channels = self.channels.len();
         let blocks = self.block_types();
 
@@ -236,6 +273,8 @@ impl Encoder {
         };
         let slot_len = header.main_data_len();
         let main_data_begin = self.reservoir.main_data_begin();
+        self.frames += 1;
+        self.bytes += header.frame_len() as u64;
 
         // Bitstream order: granule 0's channels, then granule 1's.
         let order: Vec<(usize, usize)> = (0..GRANULES)
@@ -434,9 +473,8 @@ mod tests {
 
     fn config(sample_rate: u32, channels: u16, bitrate_kbps: u32) -> EncoderConfig {
         EncoderConfig {
-            sample_rate,
-            channels,
-            bitrate_kbps,
+            info_tag: false,
+            ..EncoderConfig::new(sample_rate, channels, bitrate_kbps)
         }
     }
 
@@ -464,7 +502,7 @@ mod tests {
             .collect();
         let mut out = Vec::new();
         enc.encode(&samples, &mut out);
-        enc.finish(&mut out);
+        assert_eq!(enc.finish(&mut out), None);
 
         let mut pos = 0;
         let mut frames = 0;
@@ -479,6 +517,28 @@ mod tests {
         assert_eq!(frames, (44_100 + ENCODER_DELAY).div_ceil(SAMPLES_PER_FRAME));
         let exact = frames as u64 * 144 * 128_000 / 44_100;
         assert_eq!(out.len() as u64, exact);
+    }
+
+    #[test]
+    fn info_tag_counts_the_frames_and_bytes_that_follow_it() {
+        let mut enc = Encoder::new(EncoderConfig::new(48_000, 1, 64)).unwrap();
+        let mut out = Vec::new();
+        enc.encode(&vec![0.1; 48_000], &mut out);
+        let tag = enc.finish(&mut out).expect("tag enabled");
+        let len = tag.as_bytes().len();
+        assert!(
+            out[..len].windows(4).any(|w| w == b"Info"),
+            "placeholder is at the start"
+        );
+        tag.write_to(&mut out);
+
+        let at = 4 + 17 + 4;
+        let be = |i: usize| u32::from_be_bytes(out[at + i..at + i + 4].try_into().unwrap());
+        let frames = (48_000 + ENCODER_DELAY).div_ceil(SAMPLES_PER_FRAME) as u32;
+        assert_eq!(be(4), frames);
+        assert_eq!(be(8) as usize, out.len());
+        // 48 kHz frames are all the same length.
+        assert_eq!(out.len() - len, frames as usize * 192);
     }
 
     #[test]

@@ -19,14 +19,12 @@ fn main() -> Result<(), Box<dyn Error>> {
     let wav = fs::read(input)?;
     let (sample_rate, channels, samples) = parse_wav(&wav)?;
 
-    let mut encoder = Encoder::new(EncoderConfig {
-        sample_rate,
-        channels,
-        bitrate_kbps,
-    })?;
+    let mut encoder = Encoder::new(EncoderConfig::new(sample_rate, channels, bitrate_kbps))?;
     let mut mp3 = Vec::new();
     encoder.encode_i16(&samples, &mut mp3);
-    encoder.finish(&mut mp3);
+    if let Some(tag) = encoder.finish(&mut mp3) {
+        tag.write_to(&mut mp3);
+    }
     fs::write(output, &mp3)?;
     Ok(())
 }

@@ -9,6 +9,7 @@ pub mod filterbank;
 pub mod header;
 mod huffman;
 mod huffman_tables;
+mod info;
 mod layout;
 pub mod mdct;
 mod psycho;
@@ -17,3 +18,4 @@ mod reservoir;
 mod tables;
 
 pub use encoder::{ConfigError, ENCODER_DELAY, Encoder, EncoderConfig};
+pub use info::InfoTag;
