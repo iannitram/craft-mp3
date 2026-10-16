@@ -5,4 +5,5 @@
 pub mod bitstream;
 pub mod filterbank;
 pub mod header;
+pub mod mdct;
 mod tables;
