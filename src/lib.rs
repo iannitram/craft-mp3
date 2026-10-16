@@ -3,7 +3,14 @@
 //! The encoder is built up module by module, each with its own tests.
 
 pub mod bitstream;
+mod encoder;
 pub mod filterbank;
 pub mod header;
+mod huffman;
+mod huffman_tables;
 pub mod mdct;
+mod quantize;
+mod reservoir;
 mod tables;
+
+pub use encoder::{ConfigError, ENCODER_DELAY, Encoder, EncoderConfig};
