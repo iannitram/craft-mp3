@@ -105,6 +105,11 @@ const LOOKAHEAD: usize = 576;
 /// Largest input magnitude accepted; larger values are clipped.
 const MAX_SAMPLE: f32 = 1024.0;
 
+/// Magnitudes below this (-360 dBFS) are treated as silence: denormal floats
+/// make the filterbank and psychoacoustic maths 60 to 100 times slower, and
+/// nothing that quiet can be heard or coded.
+const DENORMAL_FLOOR: f32 = 1e-18;
+
 /// Typical stereo bitrate for each VBR quality, which sets its lowpass.
 const VBR_TYPICAL_KBPS: [u32; 10] = [245, 225, 190, 175, 165, 130, 115, 100, 85, 65];
 
@@ -216,12 +221,13 @@ impl Encoder {
     /// completed frames to `out`. Calls may split the input anywhere, even
     /// between the channels of one sample.
     ///
-    /// NaN is treated as silence and magnitudes beyond 1024 (infinities
-    /// included) are clipped, so no input can break the stream.
+    /// NaN and magnitudes below 1e-18 are treated as silence, and magnitudes
+    /// beyond 1024 (infinities included) are clipped, so no input can break
+    /// the stream or slow it down.
     pub fn encode(&mut self, samples: &[f32], out: &mut Vec<u8>) {
         let n = self.channels.len();
         for &sample in samples {
-            let sample = if sample.is_nan() {
+            let sample = if sample.is_nan() || sample.abs() < DENORMAL_FLOOR {
                 0.0
             } else {
                 sample.clamp(-MAX_SAMPLE, MAX_SAMPLE)

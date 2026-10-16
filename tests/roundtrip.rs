@@ -359,3 +359,37 @@ fn vbr_quality_out_of_range_is_rejected() {
     let err = Encoder::new(EncoderConfig::vbr(44_100, 2, 10)).err();
     assert_eq!(err, Some(craft_mp3::ConfigError::UnsupportedVbrQuality(10)));
 }
+
+/// Denormal-range samples are flushed to silence. Left alone they make the
+/// float maths 60 to 100 times slower for audio nobody can hear, so encoding
+/// them must cost about what true silence costs.
+#[test]
+fn denormal_samples_do_not_slow_encoding_down() {
+    use std::time::Instant;
+
+    let config = EncoderConfig::new(44_100, 2, 128);
+    let encode = |amplitude: f32| {
+        let mut encoder = Encoder::new(config).unwrap();
+        let mut mp3 = Vec::new();
+        let mut state = 12_345_u32;
+        let samples: Vec<f32> = (0..44_100 * 2 * 10)
+            .map(|_| {
+                state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                ((state >> 8) as f32 / (1 << 23) as f32 - 1.0) * amplitude
+            })
+            .collect();
+        let start = Instant::now();
+        encoder.encode(&samples, &mut mp3);
+        encoder.finish(&mut mp3);
+        (start.elapsed().as_secs_f64(), mp3)
+    };
+    let (silent_secs, silent) = encode(0.0);
+    for amplitude in [1e-38_f32, 1e-42] {
+        let (secs, mp3) = encode(amplitude);
+        assert_eq!(mp3, silent, "amplitude {amplitude} must encode as silence");
+        assert!(
+            secs < silent_secs * 10.0 + 1.0,
+            "amplitude {amplitude} took {secs:.2}s against {silent_secs:.2}s for silence"
+        );
+    }
+}

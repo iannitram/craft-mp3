@@ -62,6 +62,9 @@ fn parse_wav(bytes: &[u8]) -> Result<(u32, u16, Vec<i16>), Box<dyn Error>> {
         let end = (body + len).min(bytes.len());
         match id {
             b"fmt " => {
+                if len < 16 || body + 16 > bytes.len() {
+                    return Err("truncated fmt chunk".into());
+                }
                 let (tag, channels, rate, bits) = (
                     u16_at(body),
                     u16_at(body + 2),
