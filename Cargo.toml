@@ -2,9 +2,13 @@
 name = "craft-mp3"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.88"
 license = "MIT OR Apache-2.0"
 description = "Pure-Rust MP3 encoder shared by WavCraft and SoundCraft"
 repository = "https://github.com/iannitram/craft-mp3"
 publish = false
 
 [dependencies]
+
+[dev-dependencies]
+symphonia = { version = "0.5", default-features = false, features = ["mp3"] }
