@@ -5,6 +5,9 @@ The spec for 1.0 is [SPEC.md](SPEC.md); each item below now has an issue (2026-1
 The encoder itself passed the review: no bitstream bugs, and ffmpeg and symphonia
 agree on every stream checked.
 
+Where it stands (2026-10-26): the encoder is merged (PR #1) and nothing on this list is built
+yet. Ten issues, #2 to #11, cover it; #11 (release 1.0.0) comes last and is blocked by the rest.
+
 ## Before the first release
 
 1. *(#4)* **Huffman table provenance.** `src/huffman_tables.rs` matches symphonia's
@@ -46,6 +49,13 @@ agree on every stream checked.
     not accepted as PCM.
 11. *(#10)* Give 8000, 11025, 12000 and 96000 Hz input a clear message instead of
     `UnsupportedSampleRate(8000)`, and warn when both a bitrate and `--vbr` are given.
+
+## Also for 1.0 (from the spec)
+
+12. *(#2)* Delete the orphaned `src/bitwriter.rs` (never compiled; the encoder uses the
+    crate-private `BitWriter` in `src/bitstream.rs`).
+13. *(#3)* Run CI on macOS and Windows as well as Linux (SPEC M9).
+14. *(#11)* Release 1.0.0: version, tag `v1.0.0`, WavCraft and SoundCraft on the tag.
 
 ## Done in this review
 

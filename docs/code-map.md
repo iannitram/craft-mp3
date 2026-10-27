@@ -1,6 +1,6 @@
 # craft-mp3 code map
 
-A pure-Rust MP3 (MPEG-1 and MPEG-2 Layer III) encoder library, about 6 100 lines. No runtime dependencies; `#![forbid(unsafe_code)]`. Spec: [SPEC.md](../SPEC.md).
+A pure-Rust MP3 (MPEG-1 and MPEG-2 Layer III) encoder library, about 5 350 lines of source in `src/` (plus about 640 of tests and the example). No runtime dependencies; `#![forbid(unsafe_code)]`. Spec: [SPEC.md](../SPEC.md).
 
 ## Public API
 
@@ -38,18 +38,31 @@ Users: WavCraft and SoundCraft (MP3 export), as a git dependency on a tag (SPEC 
 ```mermaid
 flowchart LR
   ENC["encoder"] --> ATT["attack"]
-  ENC --> FB["filterbank"] --> MDCT["mdct"]
+  ENC --> FB["filterbank"]
+  ENC --> MDCT["mdct"]
   ENC --> PSY["psycho"]
-  ENC --> Q["quantize"] --> HUF["huffman"] --> HT["huffman_tables"]
+  ENC --> LAY["layout"]
+  ENC --> Q["quantize"]
   ENC --> RES["reservoir"]
-  ENC --> INFO["info"] --> HDR["header"]
-  ENC --> HDR
-  PSY --> LAY["layout"]
-  Q --> LAY
+  ENC --> INFO["info"]
+  ENC --> HDR["header"]
+  ENC --> BS["bitstream"]
+  MDCT --> FB
   FB --> TAB["tables"]
-  HDR --> BS["bitstream"]
-  HUF --> BS
+  LAY --> MDCT
+  LAY --> TAB
+  PSY --> LAY
+  PSY --> MDCT
+  Q --> LAY
+  Q --> MDCT
+  Q --> TAB
+  Q --> HUF["huffman"]
   Q --> BS
+  HUF --> HT["huffman_tables"]
+  HUF --> BS
+  INFO --> HDR
+  INFO --> BS
+  HDR --> BS
 ```
 
 ## The wav2mp3 example
