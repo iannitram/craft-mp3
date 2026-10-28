@@ -2,6 +2,8 @@
 
 A pure-Rust MP3 (MPEG-1 and MPEG-2 Layer III) encoder library, about 5 350 lines of source in `src/` (plus about 640 of tests and the example). No runtime dependencies; `#![forbid(unsafe_code)]`. Spec: [SPEC.md](../SPEC.md).
 
+Describes commit: 05f6955 (2026-10-28). Checked against main on that date: modules, `lib.rs` exports, the `Uses` column, line counts, the public API calls and the CI jobs all match the tree; nothing else changed.
+
 ## Public API
 
 `src/lib.rs` re-exports `Encoder`, `EncoderConfig`, `ConfigError`, `ENCODER_DELAY` (1057 samples) from `encoder`, `InfoTag` from `info`, and the public `header` module (`FrameHeader`, `SampleRate`, `ChannelMode`, `Bitrate`, `PaddingSchedule`, `HeaderError`).
