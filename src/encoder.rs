@@ -1,4 +1,4 @@
-//! The public encoder: PCM in, MPEG-1 Layer III frames out.
+//! The public encoder: PCM in, MPEG-1 or MPEG-2 Layer III frames out.
 
 use std::f32::consts::FRAC_1_SQRT_2;
 use std::fmt;
@@ -35,7 +35,9 @@ pub struct EncoderConfig {
     /// music) to 9 (smallest, about 65 kbit/s).
     pub vbr_quality: Option<u8>,
     /// Start the stream with a Xing "Info" tag frame giving players the
-    /// exact duration and a seek table; see [`Encoder::finish`].
+    /// frame count and a seek table. The duration players show from it includes
+    /// the encoder delay ([`ENCODER_DELAY`], 1057 samples) and the padding up to
+    /// a whole frame, so a 2.000 s input shows about 2.038 s.
     pub info_tag: bool,
     /// Protect each frame's header and side information with a CRC-16, so
     /// decoders can detect corruption. Costs 2 bytes per frame.
@@ -280,8 +282,8 @@ impl Encoder {
     ///
     /// With [`EncoderConfig::info_tag`], the stream began with a placeholder
     /// tag frame and this returns the finished one: write it over the start
-    /// of the stream ([`InfoTag::write_to`]) so players get the exact
-    /// duration. The stream plays correctly either way.
+    /// of the stream ([`InfoTag::write_to`]) so players get the frame count
+    /// and a seek table. The stream plays correctly either way.
     pub fn finish(mut self, out: &mut Vec<u8>) -> Option<InfoTag> {
         // Complete a partial set of channels with silence.
         while self.next_channel != 0 {
@@ -719,6 +721,33 @@ mod tests {
         assert_eq!(frames, (44_100 + ENCODER_DELAY).div_ceil(SAMPLES_PER_FRAME));
         let exact = frames as u64 * 144 * 128_000 / 44_100;
         assert_eq!(out.len() as u64, exact);
+    }
+
+    #[test]
+    fn info_tag_duration_for_two_seconds_is_about_2_038_seconds() {
+        // The docs promise this figure: a 2.000 s input shows about 2.038 s,
+        // because the frame count includes the encoder delay and padding.
+        let mut enc = Encoder::new(EncoderConfig::new(44_100, 2, 128)).unwrap();
+        let samples = vec![0.1f32; 2 * 2 * 44_100];
+        let mut out = Vec::new();
+        enc.encode(&samples, &mut out);
+        let tag = enc.finish(&mut out).expect("tag enabled");
+        tag.write_to(&mut out);
+
+        let mut pos = tag.as_bytes().len();
+        let mut frames = 0u64;
+        while pos < out.len() {
+            let header = FrameHeader::parse(out[pos..pos + 4].try_into().unwrap()).unwrap();
+            pos += header.frame_len();
+            frames += 1;
+        }
+        assert_eq!(pos, out.len());
+        assert_eq!(
+            frames,
+            (2 * 44_100 + ENCODER_DELAY).div_ceil(SAMPLES_PER_FRAME) as u64
+        );
+        let shown = frames as f64 * SAMPLES_PER_FRAME as f64 / 44_100.0;
+        assert!((shown - 2.038).abs() < 0.001, "shows {shown} s");
     }
 
     #[test]
