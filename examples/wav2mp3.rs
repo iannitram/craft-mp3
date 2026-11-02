@@ -9,7 +9,7 @@ use std::fs;
 
 use craft_mp3::{Encoder, EncoderConfig};
 
-fn main() -> Result<(), Box<dyn Error>> {
+fn run() -> Result<(), Box<dyn Error>> {
     let mut args: Vec<String> = std::env::args().collect();
     let crc = args.iter().any(|a| a == "--crc");
     args.retain(|a| a != "--crc");
@@ -30,6 +30,13 @@ fn main() -> Result<(), Box<dyn Error>> {
     let wav = fs::read(input)?;
     let (sample_rate, channels, samples) = parse_wav(&wav)?;
 
+    if ![16_000, 22_050, 24_000, 32_000, 44_100, 48_000].contains(&sample_rate) {
+        return Err(format!("{sample_rate} Hz is not supported; MP3 Layer III supports 16000, 22050, 24000, 32000, 44100 and 48000 Hz").into());
+    }
+    if vbr.is_some() && !rest.is_empty() {
+        eprintln!("warning: --vbr given, so the bitrate is used as the per-frame maximum");
+    }
+
     let base = match vbr {
         Some(quality) => EncoderConfig::vbr(sample_rate, channels, quality),
         None => EncoderConfig::new(sample_rate, channels, bitrate_kbps),
@@ -43,6 +50,13 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
     fs::write(output, &mp3)?;
     Ok(())
+}
+
+fn main() {
+    if let Err(e) = run() {
+        eprintln!("error: {e}");
+        std::process::exit(1);
+    }
 }
 
 /// Minimal RIFF/WAVE reader: 16-bit integer PCM only.
@@ -59,7 +73,11 @@ fn parse_wav(bytes: &[u8]) -> Result<(u32, u16, Vec<i16>), Box<dyn Error>> {
         let id = &bytes[pos..pos + 4];
         let len = u32_at(pos + 4) as usize;
         let body = pos + 8;
-        let end = (body + len).min(bytes.len());
+        let end = if len == 0 && id == b"data" {
+            bytes.len()
+        } else {
+            (body + len).min(bytes.len())
+        };
         match id {
             b"fmt " => {
                 if len < 16 || body + 16 > bytes.len() {
@@ -71,6 +89,20 @@ fn parse_wav(bytes: &[u8]) -> Result<(u32, u16, Vec<i16>), Box<dyn Error>> {
                     u32_at(body + 4),
                     u16_at(body + 14),
                 );
+                if tag == 0xFFFE {
+                    const PCM_GUID: [u8; 16] = [
+                        0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10, 0x00, 0x80, 0x00, 0x00, 0xaa,
+                        0x00, 0x38, 0x9b, 0x71,
+                    ];
+                    if len < 40
+                        || body + 40 > bytes.len()
+                        || bytes[body + 24..body + 40] != PCM_GUID
+                    {
+                        return Err(
+                            "unsupported WAV subformat (only integer PCM is supported)".into()
+                        );
+                    }
+                }
                 if !(tag == 1 || tag == 0xFFFE) || bits != 16 {
                     return Err("only 16-bit PCM WAV is supported".into());
                 }
@@ -78,6 +110,15 @@ fn parse_wav(bytes: &[u8]) -> Result<(u32, u16, Vec<i16>), Box<dyn Error>> {
             }
             b"data" => {
                 let (rate, channels) = format.ok_or("data chunk before fmt chunk")?;
+                if len == 0 {
+                    if end <= body {
+                        return Err("no audio data".into());
+                    }
+                    eprintln!(
+                        "warning: data chunk size is 0; using the rest of the file ({} bytes)",
+                        end - body
+                    );
+                }
                 let samples = bytes[body..end]
                     .as_chunks::<2>()
                     .0
