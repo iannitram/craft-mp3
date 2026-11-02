@@ -213,4 +213,24 @@ mod tests {
         let at = 4 + 32;
         assert_eq!(&tag.as_bytes()[at..at + 4], b"Xing");
     }
+
+    #[test]
+    fn duration_for_two_seconds_is_about_2_038_seconds() {
+        // The module doc promises this: the frame count covers the encoder delay and padding.
+        let mut enc = crate::Encoder::new(crate::EncoderConfig::new(44_100, 2, 128)).unwrap();
+        let mut out = Vec::new();
+        enc.encode(&vec![0.1f32; 2 * 2 * 44_100], &mut out);
+        let tag = enc.finish(&mut out).expect("tag enabled");
+        tag.write_to(&mut out);
+
+        let mut pos = tag.as_bytes().len();
+        let mut frames = 0u64;
+        while pos < out.len() {
+            let header = FrameHeader::parse(out[pos..pos + 4].try_into().unwrap()).unwrap();
+            pos += header.frame_len();
+            frames += 1;
+        }
+        let shown = frames as f64 * crate::header::SAMPLES_PER_FRAME as f64 / 44_100.0;
+        assert!((shown - 2.038).abs() < 0.001, "shows {shown} s");
+    }
 }
