@@ -93,3 +93,7 @@ tests on every pull request.
 ## License
 
 Licensed under either of Apache License 2.0 or MIT, at your option.
+
+The Huffman tables in `src/huffman_tables.rs` are regenerated from
+[minimp3](https://github.com/lieff/minimp3)'s CC0 `minimp3.h`. The file header
+records the source commit and the commands to regenerate and verify them.

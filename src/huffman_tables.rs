@@ -1,5 +1,11 @@
 //! Huffman code tables (ISO/IEC 11172-3, Table B.7).
 //!
+//! Generated from minimp3's CC0 minimp3.h, L3_huffman: tabs, tabindex and tab32.
+//! Source: https://github.com/lieff/minimp3/blob/ea99364f61c14656440e8d77e9c233ccf3124633/minimp3.h
+//! Regenerate: python3 tools/generate_huffman_tables.py --write
+//! Verify: python3 tools/generate_huffman_tables.py --check
+//! The generator walks decoder lookups back to codewords, excluding sign/linbits.
+//!
 //! Pair tables are indexed by `x * width + y`; quad tables by `v << 3 | w << 2 | x << 1 | y`.
 
 #[rustfmt::skip]
