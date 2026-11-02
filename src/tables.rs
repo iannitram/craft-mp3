@@ -2,6 +2,8 @@
 
 /// Polyphase synthesis window `D[i]` (Table B.3) in units of 2^-16.
 ///
+/// Values from ISO/IEC 11172-3:1993, Annex B, Table B.3 ("Coefficients D[i] of the synthesis window"), checked against the analysis window C[i] = D[i] / 32 of Table C.1.
+///
 /// Every entry of the published table is an exact multiple of 2^-16, so
 /// storing integers keeps it exact. The analysis window `C[i]` (Table C.1)
 /// is the same window divided by 32.

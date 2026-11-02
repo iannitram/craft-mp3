@@ -1,6 +1,8 @@
 //! The Xing "Info" tag: a silent first frame telling players how many
 //! frames and bytes the stream has, with a seek table, so they can show the
-//! exact duration and seek without scanning the file.
+//! duration and seek without scanning the file. That duration includes the
+//! encoder delay (1057 samples) and the padding up to a whole frame: a 2.000 s
+//! input reports about 2.038 s.
 //!
 //! The encoder can't know the counts until the end, so it writes a
 //! placeholder tag first and hands back the finished one from
