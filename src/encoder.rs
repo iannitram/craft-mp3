@@ -71,6 +71,7 @@ impl EncoderConfig {
 
 /// Why an [`EncoderConfig`] was rejected.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum ConfigError {
     UnsupportedSampleRate(u32),
     UnsupportedChannels(u16),

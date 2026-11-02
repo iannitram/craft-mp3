@@ -105,6 +105,7 @@ impl Bitrate {
 /// A sampling frequency: MPEG-1's three, or MPEG-2's low sampling
 /// frequencies (LSF), which halve the frame length.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum SampleRate {
     Hz16000,
     Hz22050,
@@ -168,6 +169,7 @@ impl SampleRate {
 
 /// The channel mode, including the Layer III mode extension for joint stereo.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum ChannelMode {
     Stereo,
     /// Joint stereo; the flags say which joint coding this frame uses.
@@ -253,6 +255,7 @@ impl Emphasis {
 
 /// Why four bytes are not a supported frame header.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum HeaderError {
     /// The 11-bit sync word is not all ones.
     NoSync,
