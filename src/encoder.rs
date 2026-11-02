@@ -104,6 +104,11 @@ impl std::error::Error for ConfigError {}
 /// the attack detector must see the granule after the frame.
 const LOOKAHEAD: usize = 576;
 
+/// Samples converted or interleaved per `encode` call by `encode_i16` and
+/// `encode_planar`, so their scratch buffer does not grow with the input.
+/// A multiple of 1 and 2, the channel counts in use.
+const CHUNK: usize = 4608;
+
 /// Largest input magnitude accepted; larger values are clipped.
 const MAX_SAMPLE: f32 = 1024.0;
 
@@ -264,17 +269,28 @@ impl Encoder {
             self.next_channel, 0,
             "a partial set of interleaved channels is pending"
         );
-        let mut interleaved = Vec::with_capacity(len * channels.len());
-        for i in 0..len {
-            interleaved.extend(channels.iter().map(|c| c[i]));
+        // Interleave a chunk of frames at a time into one reused buffer.
+        let frames_per_chunk = (CHUNK / channels.len()).max(1);
+        let mut buffer = Vec::with_capacity(frames_per_chunk * channels.len());
+        for start in (0..len).step_by(frames_per_chunk) {
+            let end = (start + frames_per_chunk).min(len);
+            buffer.clear();
+            for i in start..end {
+                buffer.extend(channels.iter().map(|c| c[i]));
+            }
+            self.encode(&buffer, out);
         }
-        self.encode(&interleaved, out);
     }
 
     /// Encodes interleaved 16-bit samples; see [`Encoder::encode`].
     pub fn encode_i16(&mut self, samples: &[i16], out: &mut Vec<u8>) {
-        let scaled: Vec<f32> = samples.iter().map(|&s| f32::from(s) / 32768.0).collect();
-        self.encode(&scaled, out);
+        // Convert a chunk at a time into one reused buffer.
+        let mut buffer = Vec::with_capacity(CHUNK.min(samples.len()));
+        for chunk in samples.chunks(CHUNK) {
+            buffer.clear();
+            buffer.extend(chunk.iter().map(|&s| f32::from(s) / 32768.0));
+            self.encode(&buffer, out);
+        }
     }
 
     /// Pads the input with silence so every sample reaches a frame, and
