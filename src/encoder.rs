@@ -724,6 +724,33 @@ mod tests {
     }
 
     #[test]
+    fn info_tag_duration_for_two_seconds_is_about_2_038_seconds() {
+        // The docs promise this figure: a 2.000 s input shows about 2.038 s,
+        // because the frame count includes the encoder delay and padding.
+        let mut enc = Encoder::new(EncoderConfig::new(44_100, 2, 128)).unwrap();
+        let samples = vec![0.1f32; 2 * 2 * 44_100];
+        let mut out = Vec::new();
+        enc.encode(&samples, &mut out);
+        let tag = enc.finish(&mut out).expect("tag enabled");
+        tag.write_to(&mut out);
+
+        let mut pos = tag.as_bytes().len();
+        let mut frames = 0u64;
+        while pos < out.len() {
+            let header = FrameHeader::parse(out[pos..pos + 4].try_into().unwrap()).unwrap();
+            pos += header.frame_len();
+            frames += 1;
+        }
+        assert_eq!(pos, out.len());
+        assert_eq!(
+            frames,
+            (2 * 44_100 + ENCODER_DELAY).div_ceil(SAMPLES_PER_FRAME) as u64
+        );
+        let shown = frames as f64 * SAMPLES_PER_FRAME as f64 / 44_100.0;
+        assert!((shown - 2.038).abs() < 0.001, "shows {shown} s");
+    }
+
+    #[test]
     fn info_tag_counts_the_frames_and_bytes_that_follow_it() {
         let mut enc = Encoder::new(EncoderConfig::new(48_000, 1, 64)).unwrap();
         let mut out = Vec::new();
