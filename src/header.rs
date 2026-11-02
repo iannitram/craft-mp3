@@ -712,6 +712,14 @@ mod tests {
     }
 
     #[test]
+    #[should_panic(expected = "not allowed at this sample rate")]
+    fn to_bytes_panics_on_bitrate_invalid_for_sample_rate() {
+        // 320 kbit/s is MPEG-1 only; 22.05 kHz is MPEG-2, whose table tops out at 160.
+        let h = FrameHeader::new(kbps(320), SampleRate::Hz22050, ChannelMode::Stereo);
+        let _ = h.to_bytes();
+    }
+
+    #[test]
     fn side_info_and_main_data_lengths() {
         let mono = FrameHeader::new(kbps(128), SampleRate::Hz48000, ChannelMode::Mono);
         assert_eq!(mono.side_info_len(), 17);
