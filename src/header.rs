@@ -1,11 +1,11 @@
-//! The 32-bit MPEG-1 Layer III frame header and frame sizing.
+//! The 32-bit MPEG-1 and MPEG-2 Layer III frame header and frame sizing.
 //!
 //! Layout (ISO/IEC 11172-3, 2.4.1.3), most significant bit first:
 //!
 //! | bits | field              |
 //! |-----:|--------------------|
 //! |   11 | sync word, all 1s  |
-//! |    2 | version, `11` = MPEG-1 |
+//! |    2 | version, `11` = MPEG-1, `10` = MPEG-2 (low sampling frequencies) |
 //! |    2 | layer, `01` = Layer III |
 //! |    1 | protection, `0` = CRC follows |
 //! |    4 | bitrate index      |
@@ -335,6 +335,10 @@ impl FrameHeader {
     }
 
     /// The header as four bytes.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the bitrate is not valid for the sample rate, for example 320 kbit/s at 22.05 kHz (MPEG-2 allows 8 to 160 kbit/s). Headers made by [`crate::Encoder`] are always valid.
     pub fn to_bytes(&self) -> [u8; HEADER_LEN] {
         let mut w = BitWriter::with_capacity(HEADER_LEN);
         self.write(&mut w);
@@ -446,6 +450,8 @@ fn bytes_per_frame_numerator(bitrate: Bitrate, sample_rate: SampleRate) -> u64 {
 ///
 /// After `n` frames the total length is exactly `floor(n * 144 * bitrate / sample_rate)`
 /// bytes. At 32 and 48 kHz every bitrate divides evenly and no frame is padded.
+///
+/// For MPEG-2's low sampling frequencies a frame is half as long, so the factor is 72 instead of 144.
 #[derive(Debug, Clone)]
 pub struct PaddingSchedule {
     /// `144 * bitrate mod sample_rate`: the fractional byte each frame owes.
@@ -703,6 +709,14 @@ mod tests {
         assert_eq!(len(128, SampleRate::Hz48000, false), 384);
         assert_eq!(len(32, SampleRate::Hz32000, false), 144);
         assert_eq!(len(320, SampleRate::Hz32000, false), 1440);
+    }
+
+    #[test]
+    #[should_panic(expected = "not allowed at this sample rate")]
+    fn to_bytes_panics_on_bitrate_invalid_for_sample_rate() {
+        // 320 kbit/s is MPEG-1 only; 22.05 kHz is MPEG-2, whose table tops out at 160.
+        let h = FrameHeader::new(kbps(320), SampleRate::Hz22050, ChannelMode::Stereo);
+        let _ = h.to_bytes();
     }
 
     #[test]
