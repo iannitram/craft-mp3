@@ -1,4 +1,4 @@
-//! Pure-Rust MP3 (MPEG-1 Layer III) encoder shared by WavCraft and SoundCraft.
+//! Pure-Rust MP3 (MPEG-1 and MPEG-2 Layer III) encoder shared by WavCraft and SoundCraft.
 //!
 //! ```
 //! use craft_mp3::{Encoder, EncoderConfig};
@@ -15,7 +15,7 @@
 //! let mut mp3 = Vec::new();
 //! encoder.encode(&pcm, &mut mp3);
 //! if let Some(tag) = encoder.finish(&mut mp3) {
-//!     // Give players the exact duration.
+//!     // Give players the frame count and a seek table.
 //!     tag.write_to(&mut mp3);
 //! }
 //! assert_eq!(&mp3[..2], [0xFF, 0xFB]);

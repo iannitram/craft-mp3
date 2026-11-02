@@ -1,4 +1,4 @@
-//! The public encoder: PCM in, MPEG-1 Layer III frames out.
+//! The public encoder: PCM in, MPEG-1 or MPEG-2 Layer III frames out.
 
 use std::f32::consts::FRAC_1_SQRT_2;
 use std::fmt;
@@ -35,7 +35,9 @@ pub struct EncoderConfig {
     /// music) to 9 (smallest, about 65 kbit/s).
     pub vbr_quality: Option<u8>,
     /// Start the stream with a Xing "Info" tag frame giving players the
-    /// exact duration and a seek table; see [`Encoder::finish`].
+    /// frame count and a seek table. The duration players show from it includes
+    /// the encoder delay ([`ENCODER_DELAY`], 1057 samples) and the padding up to
+    /// a whole frame, so a 2.000 s input shows about 2.038 s.
     pub info_tag: bool,
     /// Protect each frame's header and side information with a CRC-16, so
     /// decoders can detect corruption. Costs 2 bytes per frame.
@@ -280,8 +282,8 @@ impl Encoder {
     ///
     /// With [`EncoderConfig::info_tag`], the stream began with a placeholder
     /// tag frame and this returns the finished one: write it over the start
-    /// of the stream ([`InfoTag::write_to`]) so players get the exact
-    /// duration. The stream plays correctly either way.
+    /// of the stream ([`InfoTag::write_to`]) so players get the frame count
+    /// and a seek table. The stream plays correctly either way.
     pub fn finish(mut self, out: &mut Vec<u8>) -> Option<InfoTag> {
         // Complete a partial set of channels with silence.
         while self.next_channel != 0 {
