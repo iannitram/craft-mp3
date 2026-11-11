@@ -2,6 +2,7 @@
 
 Newest first. One line per change of stage, release or decision that the next session needs.
 
+- 2026-11-11 Roadmap map: the roadmap now opens with a features block (encoder, provenance, docs, api, wav2mp3, ci, release) and its status says 1.0.0 is released, with #16 the one open issue.
 - 2026-11-03 1.0.0: first release. Huffman table source recorded (#4); docs fixed for MPEG-2 and the Info-tag duration (#5, #6, #7); public enums non_exhaustive (#8); chunked encode_i16/encode_planar (#9); wav2mp3 input checks (#10); CI on Mac, PC and Linux (#3); dead bitwriter removed (#2).
 - 2026-10-26 End-of-night sweep: code map links and counts corrected, ROADMAP lists #2, #3 and #11 with a status line; locked tests added to Easy issues #2, #8, #9, #10, #11; #3, #5, #6, #7 state their CI check.
 - 2026-10-26 Spec approved by the owner ("ROADMAP's first release (Recommended)"): SPEC.md, docs/code-map.md, issues #3-#11; ROADMAP item 2 found done; stage Dev Loop.

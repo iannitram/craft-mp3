@@ -1,14 +1,28 @@
 # Roadmap
 
-Open items for craft-mp3, from the independent review of the encoder PR (2026-10-16).
-The spec for 1.0 is [SPEC.md](SPEC.md); each item below now has an issue (2026-10-26).
+Updated: 2026-11-11
+
+features:
+- encoder: The Layer III encoder: MPEG-1 and MPEG-2 rates, mono and joint stereo, CBR and VBR, the Info tag, CRC-16; pure Rust, no unsafe (SPEC M1, M2)
+- provenance: Recorded, licence-clean sources for the Huffman tables and the borrowed constants (items 1 to 3; SPEC M3, M4)
+- docs: Accurate docs: MPEG-1 and MPEG-2 wording, what the Info-tag duration counts, the to_bytes panic (items 4 to 6; SPEC M5)
+- api: The public API: non_exhaustive enums, chunked encode_i16 and encode_planar (items 7 and 8; SPEC M6, M7)
+- wav2mp3: The wav2mp3 example and its input checks (items 9 to 11; SPEC M8)
+- ci: CI on Mac, PC and Linux, the test suite, and no dead code (items 12 and 13; SPEC M9, M10)
+- release: Releases: version, tag, and WavCraft and SoundCraft on the tag (item 14; SPEC M11)
+
+The list for craft-mp3's first release, from the independent review of the encoder PR
+(2026-10-16). The spec for 1.0 is [SPEC.md](SPEC.md); each item below has an issue.
 The encoder itself passed the review: no bitstream bugs, and ffmpeg and symphonia
 agree on every stream checked.
 
-Where it stands (2026-10-26): the encoder is merged (PR #1) and nothing on this list is built
-yet. Ten issues, #2 to #11, cover it; #11 (release 1.0.0) comes last and is blocked by the rest.
+Where it stands (2026-11-11): 1.0.0 is released. Every item below is built and merged
+(PRs #12 to #22, 2026-11-02 to 2026-11-04), issues #2 to #11 are closed, the version is
+1.0.0 and the tag `v1.0.0` exists. One issue is open: #16, remove the duplicate test of
+the 2.038 s Info-tag duration (PRs #14 and #15 each added one). Nothing is planned for
+After 1.0 yet.
 
-## Before the first release
+## Before the first release (all done)
 
 1. *(#4)* **Huffman table provenance.** `src/huffman_tables.rs` matches symphonia's
    `codebooks.rs` value for value (symphonia is MPL-2.0; the crate is MIT OR Apache-2.0
@@ -27,7 +41,7 @@ yet. Ten issues, #2 to #11, cover it; #11 (release 1.0.0) comes last and is bloc
    Say where they come from. The 512-entry window in `src/tables.rs` is only described
    as "ISO Table B.3"; confirm its source.
 
-## Docs and API
+## Docs and API (all done)
 
 4. *(#6, #7)* Say what the Info tag's duration really is: it counts the 1057-sample delay plus the
    padding up to whole frames (a 2.000 s input reports 2.0376 s), so "exact duration" is
@@ -41,7 +55,7 @@ yet. Ten issues, #2 to #11, cover it; #11 (release 1.0.0) comes last and is bloc
 8. *(#9)* `encode_i16` and `encode_planar` copy the whole input; chunk them to halve peak memory
    on huge buffers.
 
-## The `wav2mp3` example
+## The `wav2mp3` example (all done)
 
 9. *(#10)* A `data` chunk of size 0 followed by real data (a recorder that crashed) gives a
    one-frame silent file and exit code 0. Warn or fail.
@@ -50,7 +64,7 @@ yet. Ten issues, #2 to #11, cover it; #11 (release 1.0.0) comes last and is bloc
 11. *(#10)* Give 8000, 11025, 12000 and 96000 Hz input a clear message instead of
     `UnsupportedSampleRate(8000)`, and warn when both a bitrate and `--vbr` are given.
 
-## Also for 1.0 (from the spec)
+## Also for 1.0 (from the spec) (all done)
 
 12. *(#2)* Delete the orphaned `src/bitwriter.rs` (never compiled; the encoder uses the
     crate-private `BitWriter` in `src/bitstream.rs`).
