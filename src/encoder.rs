@@ -464,7 +464,6 @@ impl Encoder {
                 intensity: false,
             },
         };
-        let main_data_begin = self.reservoir.main_data_begin();
         let header = match self.vbr_relax_db {
             None => FrameHeader {
                 padding: self.padding.next_padding(),
@@ -479,21 +478,27 @@ impl Encoder {
                     mode,
                     ..self.template
                 })
-                .find(|h| 8 * (main_data_begin + h.main_data_len()) as u32 >= demand + 8)
+                .find(|h| {
+                    let begin = self.reservoir.main_data_begin_for(h.frame_len());
+                    8 * (begin + h.main_data_len()) as u32 >= demand + 8
+                })
                 .unwrap_or(FrameHeader {
                     mode,
                     ..self.template
                 }),
         };
         let slot_len = header.main_data_len();
+        let main_data_begin = self.reservoir.main_data_begin_for(header.frame_len());
         self.frame_lengths.push(header.frame_len() as u32);
 
         // Bits this frame can use, and how many it must use: whatever the
-        // next frame can't borrow is lost. The last byte stays unused: some
+        // next frame can't borrow is lost (a next frame of this size, under
+        // the decoder-buffer limit too). The last byte stays unused: some
         // decoders (symphonia) reject a frame whose main data fills its
         // space exactly when a later granule in it is empty.
         let available = (8 * (main_data_begin + slot_len) as u32).saturating_sub(8);
-        let must_use = available.saturating_sub(8 * self.reservoir.max_begin() as u32);
+        let lendable = self.reservoir.begin_limit(header.frame_len());
+        let must_use = available.saturating_sub(8 * lendable as u32);
 
         // Steer the next frame's relaxation towards demand matching supply.
         let ratio = demand.max(1) as f32 / available.max(1) as f32;

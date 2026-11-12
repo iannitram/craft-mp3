@@ -5,12 +5,22 @@
 //! own slot, in space earlier frames left unused (`main_data_begin`), so
 //! main data runs as one contiguous stream across the slots. Frames are
 //! held back until no later frame can still write into them.
+//!
+//! The standard also sizes the decoder's input buffer at 7680 bits
+//! (ISO/IEC 11172-3, Layer III bit reservoir): a frame together with the
+//! earlier bytes its main data starts in must fit in it, so a frame of 960
+//! bytes or more cannot borrow at all. The same limit is kept at the
+//! MPEG-2 rates.
 
 use std::collections::VecDeque;
 
 /// Largest `main_data_begin` the 9-bit MPEG-1 field can express (MPEG-2
 /// uses 8 bits).
 pub(crate) const MAX_MAIN_DATA_BEGIN: usize = (1 << 9) - 1;
+
+/// The decoder's input buffer in bytes: a frame plus its
+/// `main_data_begin` must not exceed it.
+pub(crate) const DECODER_BUFFER: usize = 7680 / 8;
 
 struct PendingFrame {
     bytes: Vec<u8>,
@@ -53,23 +63,32 @@ impl Reservoir {
         }
     }
 
-    /// Largest `main_data_begin` the stream allows: how far back any
-    /// frame's main data can reach.
-    pub(crate) fn max_begin(&self) -> usize {
-        self.max_begin
-    }
-
-    /// Bytes of earlier slots the next frame's main data may start in.
+    /// Bytes of earlier slots the next frame's main data may start in,
+    /// whatever its size.
     pub(crate) fn main_data_begin(&self) -> usize {
         (self.end - self.written).min(self.max_begin)
     }
 
+    /// Largest `main_data_begin` a frame of `frame_len` bytes may have:
+    /// the field's limit and what the decoder's buffer leaves beside it.
+    pub(crate) fn begin_limit(&self, frame_len: usize) -> usize {
+        self.max_begin.min(DECODER_BUFFER.saturating_sub(frame_len))
+    }
+
+    /// Bytes of earlier slots the next frame's main data may start in, for
+    /// a frame of `frame_len` bytes. Unused bytes it cannot reach stay
+    /// zero (stuffing).
+    pub(crate) fn main_data_begin_for(&self, frame_len: usize) -> usize {
+        self.main_data_begin().min(self.begin_limit(frame_len))
+    }
+
     /// Adds a frame. `head` is the header, optional CRC and side information,
-    /// whose `main_data_begin` must equal [`Self::main_data_begin`];
-    /// `slot_len` is the frame's main-data space and `main_data` the bytes
-    /// to place, which must fit in `main_data_begin + slot_len`.
+    /// whose `main_data_begin` must equal [`Self::main_data_begin_for`] the
+    /// frame's length (`head` plus `slot_len`); `slot_len` is the frame's
+    /// main-data space and `main_data` the bytes to place, which must fit in
+    /// `main_data_begin + slot_len`.
     pub(crate) fn push(&mut self, head: &[u8], slot_len: usize, main_data: &[u8]) {
-        let begin = self.main_data_begin();
+        let begin = self.main_data_begin_for(head.len() + slot_len);
         assert!(
             main_data.len() <= begin + slot_len,
             "main data overflows the reservoir"
@@ -177,6 +196,26 @@ mod tests {
         r.push(&[1], 300, &[]);
         r.push(&[2], 300, &[]);
         assert_eq!(r.main_data_begin(), 255);
+    }
+
+    #[test]
+    fn a_frame_and_its_borrowed_bytes_fit_the_decoder_buffer() {
+        let mut r = Reservoir::default();
+        r.push(&[1], 600, &[]);
+        assert_eq!(r.main_data_begin(), MAX_MAIN_DATA_BEGIN);
+        // A 700-byte frame may reach back only 260 bytes.
+        assert_eq!(r.main_data_begin_for(700), DECODER_BUFFER - 700);
+        // A frame of 960 bytes or more cannot borrow at all.
+        assert_eq!(r.main_data_begin_for(960), 0);
+        assert_eq!(r.main_data_begin_for(1441), 0);
+
+        r.push(&[2; 100], 600, &[5; 860]);
+        let mut out = Vec::new();
+        r.drain_all(&mut out);
+        // Frame 2 starts 260 bytes back: the first 340 bytes of frame 1's
+        // slot stay zero.
+        assert_eq!(out[1..341], [0; 340]);
+        assert_eq!(out[341..601], [5; 260]);
     }
 
     #[test]
