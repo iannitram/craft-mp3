@@ -33,7 +33,7 @@ Users: WavCraft and SoundCraft (MP3 export), as a git dependency on a tag (SPEC 
 | `reservoir` | Frame assembly with the Layer III bit reservoir | - |
 | `bitstream` | MSB-first bit packing (`BitWriter`, crate-private) | - |
 | `header` (public) | The 32-bit frame header, bitrates, sample rates, channel modes, frame sizing and padding schedule | bitstream |
-| `info` | The Xing/Info tag: frame and byte counts, seek table | bitstream, header |
+| `info` | The Xing/Info tag: frame and byte counts, seek table, LAME-layout delay, padding and CRCs (`LAMEcraft` marker), CRC-16 | bitstream, encoder (`ENCODER_DELAY`), header |
 | `tables` | Shared ISO constant tables (synthesis window D[i], Table B.3) | - |
 | `bitwriter.rs` | Orphaned file, not compiled; removed by #2 | - |
 
@@ -74,6 +74,7 @@ flowchart LR
 ## Tests and CI
 
 - `tests/roundtrip.rs`: decode every sample rate, channel count and bitrate with symphonia and compare; pre-echo, CRC and Info-tag checks.
+- `tests/gapless.rs`: reads the LAME-layout fields back for every rate, length and mode; opt-in ffmpeg check (`--ignored`) that the decode has the input's exact length.
 - `tests/stress.rs`: long and edge-case input (denormals, silence, clipping).
 - Unit tests live beside each module.
 - `.github/workflows/ci.yml`: fmt, clippy (`-D warnings`) and tests on Rust 1.99, plus the MSRV (1.88) test run. Linux only today; Mac and Windows are #3.
