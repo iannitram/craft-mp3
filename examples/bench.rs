@@ -705,7 +705,12 @@ pub fn run(args: &[String]) -> Res<String> {
         }
     }
 
-    let dir = std::env::temp_dir().join(format!("craft-mp3-bench-{}", std::process::id()));
+    // One folder per run, not per process: the smoke tests call `run` from
+    // parallel threads of one process, and a shared folder let one run delete
+    // the other's input (NotFound on Linux and Windows CI).
+    static RUN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let run_id = RUN.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let dir = std::env::temp_dir().join(format!("craft-mp3-bench-{}-{run_id}", std::process::id()));
     std::fs::create_dir_all(&dir)?;
     let mut rows = Vec::new();
     let mut last_wav: Option<(String, u32, PathBuf)> = None;
