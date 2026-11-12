@@ -29,6 +29,7 @@ fn src_holds_exactly_the_expected_files() {
             "header.rs",
             "huffman.rs",
             "huffman_tables.rs",
+            "id3.rs",
             "info.rs",
             "layout.rs",
             "lib.rs",
