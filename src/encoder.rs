@@ -44,7 +44,7 @@ pub struct EncoderConfig {
     /// decoders can detect corruption. Costs 2 bytes per frame.
     pub crc: bool,
     /// Compute and record the input's peak amplitude in the Info tag's
-    /// ReplayGain field. On by default.
+    /// ReplayGain field. Off by default, so default output stays byte-identical to 1.1.0.
     pub replaygain: bool,
 }
 
@@ -58,7 +58,7 @@ impl EncoderConfig {
             vbr_quality: None,
             info_tag: true,
             crc: false,
-            replaygain: true,
+            replaygain: false,
         }
     }
 

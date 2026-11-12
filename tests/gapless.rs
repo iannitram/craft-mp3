@@ -112,7 +112,9 @@ fn read_tag(mp3: &[u8]) -> Tag {
 fn check_stream(rate: u32, channels: u16, vbr: bool, per_channel: usize) {
     let kbps = RATES.iter().find(|r| r.0 == rate).unwrap().1;
     let label = format!("{rate} Hz, {channels} ch, vbr {vbr}, {per_channel} samples");
-    let mp3 = encode(config(rate, kbps, channels, vbr), per_channel);
+    let mut cfg = config(rate, kbps, channels, vbr);
+    cfg.replaygain = true;
+    let mp3 = encode(cfg, per_channel);
     let tag = read_tag(&mp3);
 
     assert_eq!(&tag.id, if vbr { b"Xing" } else { b"Info" }, "{label}");
@@ -201,7 +203,9 @@ fn replaygain_peak_matches_input_peak() {
                     let kbps = RATES.iter().find(|r| r.0 == rate).unwrap().1;
                     let label =
                         format!("{rate} Hz, {channels} ch, vbr {vbr}, {per_channel} samples");
-                    let mp3 = encode(config(rate, kbps, channels, vbr), per_channel);
+                    let mut cfg = config(rate, kbps, channels, vbr);
+                    cfg.replaygain = true;
+                    let mp3 = encode(cfg, per_channel);
                     let tag = read_tag(&mp3);
                     let expected_peak = if per_channel == 0 {
                         0.0
@@ -224,7 +228,11 @@ fn replaygain_peak_matches_input_peak() {
     // Explicit peak levels: silence (0.0), half-scale (0.5), full-scale (1.0).
     for (peak_in, expected) in [(0.0f32, 0.0f32), (0.5, 0.5), (1.0, 1.0)] {
         let pcm = vec![peak_in; 2000];
-        let mut encoder = Encoder::new(EncoderConfig::new(44_100, 1, 128)).unwrap();
+        let mut encoder = Encoder::new(EncoderConfig {
+            replaygain: true,
+            ..EncoderConfig::new(44_100, 1, 128)
+        })
+        .unwrap();
         let mut mp3 = Vec::new();
         encoder.encode(&pcm, &mut mp3);
         let tag = encoder.finish(&mut mp3).unwrap();
@@ -244,7 +252,11 @@ fn tag_crc_valid_with_replaygain() {
         let pcm: Vec<f32> = (0..2000)
             .map(|i| (i as f32 * 0.05).sin() * peak_scale)
             .collect();
-        let mut encoder = Encoder::new(EncoderConfig::new(44_100, 1, 128)).unwrap();
+        let mut encoder = Encoder::new(EncoderConfig {
+            replaygain: true,
+            ..EncoderConfig::new(44_100, 1, 128)
+        })
+        .unwrap();
         let mut mp3 = Vec::new();
         encoder.encode(&pcm, &mut mp3);
         let tag = encoder.finish(&mut mp3).unwrap();
@@ -283,7 +295,9 @@ fn ffmpeg_decodes_exactly_the_input_length() {
         for channels in [1u16, 2] {
             for vbr in [false, true] {
                 for per_channel in FFMPEG_LENGTHS {
-                    let mp3 = encode(config(rate, kbps, channels, vbr), per_channel);
+                    let mut cfg = config(rate, kbps, channels, vbr);
+                    cfg.replaygain = true;
+                    let mp3 = encode(cfg, per_channel);
                     let path = dir.join(format!(
                         "craft-mp3-gapless-{}-{rate}-{channels}-{vbr}-{per_channel}.mp3",
                         std::process::id()
@@ -315,4 +329,21 @@ fn ffmpeg_decodes_exactly_the_input_length() {
             }
         }
     }
+}
+
+#[test]
+fn replaygain_is_off_by_default() {
+    assert!(!EncoderConfig::new(44_100, 2, 128).replaygain);
+    assert!(!EncoderConfig::vbr(44_100, 2, 2).replaygain);
+    let pcm = vec![0.5f32; 4000];
+    let mut encoder = Encoder::new(EncoderConfig::new(44_100, 2, 128)).unwrap();
+    let mut mp3 = Vec::new();
+    encoder.encode(&pcm, &mut mp3);
+    let tag = encoder.finish(&mut mp3).unwrap();
+    tag.write_to(&mut mp3);
+    assert_eq!(
+        read_tag(&mp3).peak,
+        0.0,
+        "the peak field stays zero unless replaygain is set"
+    );
 }
