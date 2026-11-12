@@ -1,6 +1,6 @@
 # Peer scan (2026-11-12)
 
-Part of [issue #31](https://github.com/iannitram/craft-mp3/issues/31) (After 1.0, item A3). The peer list and the licences are in [SPEC.md `## Prior art`](../SPEC.md). The feature list comes from issue #31; I read the issue through a page summary, not the raw body, so check the list against the issue.
+Part of [issue #31](https://github.com/iannitram/craft-mp3/issues/31) (After 1.0, item A3). The peer list and the licences are in [SPEC.md `## Prior art`](../SPEC.md). The feature list comes from issue #31.
 
 Key: **yes**, **no**, **partial** (some of it, or only by a workaround), **?** (not confirmed on a page I read). craft-mp3's column is read from this repo's code. Each cell cites a source number; the sources are listed at the end, and each one was fetched and returned HTTP 200 on 2026-11-12.
 
@@ -39,14 +39,14 @@ Notes on specific cells:
 
 ## Gaps worth doing
 
-Six gaps. Each has a section in `_proposed-issues.md` (untracked, not committed) with a verdict and acceptance criteria.
+Six gaps, each filed as its own issue in milestone "After 1.0" (label `from-peer`), with a verdict, acceptance criteria and tests.
 
-1. **ABR mode.** A target average bitrate between CBR and VBR. LAME (`--abr`) and ffmpeg's wrapper have it [S1][S9].
-2. **Forced stereo mode.** A caller can force mid/side on or off, and choose dual channel. LAME has `-m f`, `-m d` and `lame_set_force_ms` [S1][S2]. craft-mp3 decides per frame only [C1].
-3. **24-bit and float WAV input in `wav2mp3`.** The reader takes 16-bit PCM only [C6]; the library already takes f32 [C1].
-4. **ReplayGain in the LAME-layout tag.** LAME writes the peak and gain fields and has `lame_set_findReplayGain` [S1][S2]; craft-mp3 does not record them [C3].
-5. **A `std::io::Write` adapter.** Output is a caller-owned `Vec<u8>` [C1]; no peer's core API is a stream either [S2][S5][S12], so this is a small convenience, not a port.
-6. **A wasm32 build check in CI.** audiobox-rs and rusty_mp3 claim WebAssembly builds [S14][S13]; craft-mp3's CI has no wasm job [C7].
+1. **ABR mode.** ([#34](https://github.com/iannitram/craft-mp3/issues/34)) A target average bitrate between CBR and VBR. LAME (`--abr`) and ffmpeg's wrapper have it [S1][S9].
+2. **Forced stereo mode.** ([#35](https://github.com/iannitram/craft-mp3/issues/35)) A caller can force mid/side on or off, and choose dual channel. LAME has `-m f`, `-m d` and `lame_set_force_ms` [S1][S2]. craft-mp3 decides per frame only [C1].
+3. **24-bit and float WAV input in `wav2mp3`.** ([#36](https://github.com/iannitram/craft-mp3/issues/36)) The reader takes 16-bit PCM only [C6]; the library already takes f32 [C1].
+4. **ReplayGain in the LAME-layout tag.** ([#37](https://github.com/iannitram/craft-mp3/issues/37)) LAME writes the peak and gain fields and has `lame_set_findReplayGain` [S1][S2]; craft-mp3 does not record them [C3].
+5. **A `std::io::Write` adapter.** ([#38](https://github.com/iannitram/craft-mp3/issues/38)) Output is a caller-owned `Vec<u8>` [C1]; no peer's core API is a stream either [S2][S5][S12], so this is a small convenience, not a port.
+6. **A wasm32 build check in CI.** ([#39](https://github.com/iannitram/craft-mp3/issues/39)) audiobox-rs and rusty_mp3 claim WebAssembly builds [S14][S13]; craft-mp3's CI has no wasm job [C7].
 
 ## Not worth doing
 
