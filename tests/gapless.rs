@@ -74,6 +74,7 @@ struct Tag {
     frames: u32,
     quality: u32,
     version: [u8; 9],
+    peak: f32,
     delay: u32,
     padding: u32,
     music_len: u32,
@@ -90,12 +91,14 @@ fn read_tag(mp3: &[u8]) -> Tag {
     let u32_at = |i: usize| u32::from_be_bytes(frame[at + i..at + i + 4].try_into().unwrap());
     let u16_at = |i: usize| u16::from_be_bytes(frame[at + i..at + i + 2].try_into().unwrap());
     let delay_padding = u32::from_be_bytes([0, frame[at + 141], frame[at + 142], frame[at + 143]]);
+    let peak_raw = u32_at(131);
     Tag {
         id: frame[at..at + 4].try_into().unwrap(),
         frame_len,
         frames: u32_at(8),
         quality: u32_at(116),
         version: frame[at + 120..at + 129].try_into().unwrap(),
+        peak: peak_raw as f32 / 8_388_608.0,
         delay: delay_padding >> 12,
         padding: delay_padding & 0xFFF,
         music_len: u32_at(148),
@@ -150,6 +153,20 @@ fn check_stream(rate: u32, channels: u16, vbr: bool, per_channel: usize) {
     assert!(tag.padding < tag.samples_per_frame as u32 + 529, "{label}");
     assert!(tag.quality <= 100, "{label}");
     assert!(decoded >= per_channel + ENCODER_DELAY, "{label}");
+
+    let expected_peak = if per_channel == 0 {
+        0.0
+    } else {
+        let channels_usize = usize::from(channels);
+        (0..per_channel * channels_usize)
+            .map(|i| ((i as f32 * 0.05).sin() * 0.5).abs())
+            .fold(0.0f32, f32::max)
+    };
+    assert!(
+        (tag.peak - expected_peak).abs() < 1e-4,
+        "{label}: peak expected {expected_peak}, got {}",
+        tag.peak
+    );
 }
 
 #[test]
@@ -173,6 +190,75 @@ fn vbr_quality_is_recorded_on_the_scale_lame_uses() {
     assert_eq!(read_tag(&mp3).quality, 60);
     let mp3 = encode(EncoderConfig::new(44_100, 2, 128), 1000);
     assert_eq!(read_tag(&mp3).quality, 100);
+}
+
+#[test]
+fn replaygain_peak_matches_input_peak() {
+    for (rate, _) in RATES {
+        for channels in [1, 2] {
+            for vbr in [false, true] {
+                for per_channel in LENGTHS {
+                    let kbps = RATES.iter().find(|r| r.0 == rate).unwrap().1;
+                    let label =
+                        format!("{rate} Hz, {channels} ch, vbr {vbr}, {per_channel} samples");
+                    let mp3 = encode(config(rate, kbps, channels, vbr), per_channel);
+                    let tag = read_tag(&mp3);
+                    let expected_peak = if per_channel == 0 {
+                        0.0
+                    } else {
+                        let channels_usize = usize::from(channels);
+                        (0..per_channel * channels_usize)
+                            .map(|i| ((i as f32 * 0.05).sin() * 0.5).abs())
+                            .fold(0.0f32, f32::max)
+                    };
+                    assert!(
+                        (tag.peak - expected_peak).abs() < 1e-4,
+                        "{label}: expected {expected_peak}, got {}",
+                        tag.peak
+                    );
+                }
+            }
+        }
+    }
+
+    // Explicit peak levels: silence (0.0), half-scale (0.5), full-scale (1.0).
+    for (peak_in, expected) in [(0.0f32, 0.0f32), (0.5, 0.5), (1.0, 1.0)] {
+        let pcm = vec![peak_in; 2000];
+        let mut encoder = Encoder::new(EncoderConfig::new(44_100, 1, 128)).unwrap();
+        let mut mp3 = Vec::new();
+        encoder.encode(&pcm, &mut mp3);
+        let tag = encoder.finish(&mut mp3).unwrap();
+        tag.write_to(&mut mp3);
+        let tag = read_tag(&mp3);
+        assert!(
+            (tag.peak - expected).abs() < 1e-4,
+            "input peak {peak_in}: expected {expected}, got {}",
+            tag.peak
+        );
+    }
+}
+
+#[test]
+fn tag_crc_valid_with_replaygain() {
+    for peak_scale in [0.0, 0.25, 0.5, 0.75, 1.0] {
+        let pcm: Vec<f32> = (0..2000)
+            .map(|i| (i as f32 * 0.05).sin() * peak_scale)
+            .collect();
+        let mut encoder = Encoder::new(EncoderConfig::new(44_100, 1, 128)).unwrap();
+        let mut mp3 = Vec::new();
+        encoder.encode(&pcm, &mut mp3);
+        let tag = encoder.finish(&mut mp3).unwrap();
+        tag.write_to(&mut mp3);
+        let parsed = read_tag(&mp3);
+        let side_info_len = FrameHeader::parse(mp3[..4].try_into().unwrap())
+            .unwrap()
+            .side_info_len();
+        assert_eq!(
+            parsed.tag_crc,
+            crc16(&mp3[..4 + side_info_len + 154]),
+            "peak scale {peak_scale}"
+        );
+    }
 }
 
 fn ffmpeg_available() -> bool {

@@ -50,6 +50,8 @@ both in LAME's tag layout, after the frame count and seek table:
 - the encoder delay, 528 (decoders add their own 529, so 1057 in all);
 - the padding: frames x 1152 (x 576 at MPEG-2 rates) less the input length
   less 528, so the decoded length is the input's exactly;
+- the peak amplitude of the input audio in LAME's 9.23 fixed-point format (on
+  by default, `EncoderConfig::replaygain`);
 - the music length and a CRC-16 of the audio frames, and a CRC-16 of the tag
   itself (from its id through the music CRC). Both use polynomial 0xA001,
   initial value 0.
@@ -78,6 +80,15 @@ The layout follows LAME's documented tag format, written fresh for this
 crate. The approach comes from
 [audiobox-rs](https://github.com/jmsansan/audiobox-rs) (MIT), which first
 used the `LAME`-prefixed marker to make ffmpeg apply the fields.
+
+### ReplayGain
+
+The peak amplitude of the decoded input is recorded in the LAME-layout peak
+field (on by default whenever the Info tag is enabled, controlled by
+`EncoderConfig::replaygain`). Track and album gain fields are left at zero
+(unspecified) because computing ITU-R BS.1770 / ReplayGain 2.0 loudness
+requires integrated multi-pass analysis or buffering over the full stream,
+which is not performed during streaming encoding.
 
 ## Quality
 
