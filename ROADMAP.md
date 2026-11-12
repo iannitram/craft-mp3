@@ -26,7 +26,7 @@ fix (#24) are merged; release 1.1.0 is in review (PR #28). The After 1.0 plan is
 
 ## After 1.0
 
-craft-mp3 has the same priority as WavCraft. These are planned, in milestone "After 1.0":
+These are planned, in milestone "After 1.0":
 
 - A1. *(#29)* **ID3v2.4 tags.** Title, artist, album, year and comment, and `CHAP`/`CTOC`
   chapters so WavCraft markers become chapters. The tag goes in front of the Info frame,
