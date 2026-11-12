@@ -1,13 +1,56 @@
-//! Encodes a 16-bit PCM WAV file to MP3.
+//! Encodes a WAV file (16-bit or 24-bit integer PCM, or 32-bit IEEE float) to MP3.
 //!
 //! ```text
 //! cargo run --release --example wav2mp3 -- input.wav output.mp3 [kbps | --vbr Q] [--crc]
+//!     [--title T] [--artist A] [--album L] [--year YYYY] [--comment C]
+//!     [--chapter "name@seconds"]...
 //! ```
+//!
+//! The tag flags write an ID3v2.4 tag in front of the stream; without them
+//! the output has no tag.
 
 use std::error::Error;
 use std::fs;
 
-use craft_mp3::{Encoder, EncoderConfig};
+use craft_mp3::{Encoder, EncoderConfig, Id3Tag, with_id3};
+
+/// Removes `flag value` from `args` and returns the value, if the flag is in
+/// there. Removing it first keeps it out of the positional arguments.
+fn take_value(args: &mut Vec<String>, flag: &str) -> Result<Option<String>, Box<dyn Error>> {
+    match args.iter().position(|a| a == flag) {
+        Some(i) if i + 1 < args.len() => {
+            let value = args.remove(i + 1);
+            args.remove(i);
+            Ok(Some(value))
+        }
+        Some(_) => Err(format!("{flag} needs a value").into()),
+        None => Ok(None),
+    }
+}
+
+/// Removes every `flag value` pair from `args` and returns the values in order.
+fn take_all(args: &mut Vec<String>, flag: &str) -> Result<Vec<String>, Box<dyn Error>> {
+    let mut values = Vec::new();
+    while let Some(value) = take_value(args, flag)? {
+        values.push(value);
+    }
+    Ok(values)
+}
+
+/// Parses `name@seconds` into the chapter's name and its start in samples.
+fn parse_chapter(spec: &str, sample_rate: u32) -> Result<(String, u64), Box<dyn Error>> {
+    let (name, seconds) = spec
+        .rsplit_once('@')
+        .ok_or_else(|| format!("--chapter {spec:?} needs the form name@seconds"))?;
+    let seconds: f64 = seconds
+        .parse()
+        .map_err(|_| format!("--chapter {spec:?}: {seconds:?} is not a time in seconds"))?;
+    if !seconds.is_finite() || seconds < 0.0 {
+        return Err(format!("--chapter {spec:?}: the time must be zero or more seconds").into());
+    }
+    let start = (seconds * f64::from(sample_rate)).round() as u64;
+    Ok((name.to_owned(), start))
+}
 
 fn run() -> Result<(), Box<dyn Error>> {
     let mut args: Vec<String> = std::env::args().collect();
@@ -22,8 +65,16 @@ fn run() -> Result<(), Box<dyn Error>> {
         Some(_) => return Err("--vbr needs a quality from 0 to 9".into()),
         None => None,
     };
+    let title = take_value(&mut args, "--title")?;
+    let artist = take_value(&mut args, "--artist")?;
+    let album = take_value(&mut args, "--album")?;
+    let year = take_value(&mut args, "--year")?
+        .map(|y| y.parse::<u16>())
+        .transpose()?;
+    let comment = take_value(&mut args, "--comment")?;
+    let chapters = take_all(&mut args, "--chapter")?;
     let [_, input, output, rest @ ..] = args.as_slice() else {
-        return Err("usage: wav2mp3 <input.wav> <output.mp3> [kbps | --vbr Q] [--crc]".into());
+        return Err("usage: wav2mp3 <input.wav> <output.mp3> [kbps | --vbr Q] [--crc] [--title T] [--artist A] [--album L] [--year YYYY] [--comment C] [--chapter name@seconds]...".into());
     };
     let bitrate_kbps = rest.first().map_or(Ok(128), |s| s.parse())?;
 
@@ -44,10 +95,51 @@ fn run() -> Result<(), Box<dyn Error>> {
     let config = EncoderConfig { crc, ..base };
     let mut encoder = Encoder::new(config)?;
     let mut mp3 = Vec::new();
-    encoder.encode_i16(&samples, &mut mp3);
+    let total = match &samples {
+        Samples::I16(s) => s.len(),
+        Samples::F32(s) => s.len(),
+    };
+    match samples {
+        Samples::I16(s) => encoder.encode_i16(&s, &mut mp3),
+        Samples::F32(s) => encoder.encode(&s, &mut mp3),
+    }
     if let Some(tag) = encoder.finish(&mut mp3) {
         tag.write_to(&mut mp3);
     }
+
+    let tagged = title.is_some()
+        || artist.is_some()
+        || album.is_some()
+        || year.is_some()
+        || comment.is_some()
+        || !chapters.is_empty();
+    let mp3 = if tagged {
+        let mut tag = Id3Tag::new();
+        if let Some(t) = &title {
+            tag = tag.title(t);
+        }
+        if let Some(a) = &artist {
+            tag = tag.artist(a);
+        }
+        if let Some(l) = &album {
+            tag = tag.album(l);
+        }
+        if let Some(y) = year {
+            tag = tag.year(y);
+        }
+        if let Some(c) = &comment {
+            tag = tag.comment(c);
+        }
+        for spec in &chapters {
+            let (name, start) = parse_chapter(spec, sample_rate)?;
+            tag = tag.chapter(&name, start, None);
+        }
+        // Times are per channel, so the input length is the frame count.
+        let frames = total / usize::from(channels).max(1);
+        with_id3(&tag, &mp3, sample_rate, frames as u64)?
+    } else {
+        mp3
+    };
     fs::write(output, &mp3)?;
     Ok(())
 }
@@ -59,8 +151,20 @@ fn main() {
     }
 }
 
-/// Minimal RIFF/WAVE reader: 16-bit integer PCM only.
-fn parse_wav(bytes: &[u8]) -> Result<(u32, u16, Vec<i16>), Box<dyn Error>> {
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum WavFormat {
+    Pcm16,
+    Pcm24,
+    Float32,
+}
+
+enum Samples {
+    I16(Vec<i16>),
+    F32(Vec<f32>),
+}
+
+/// Minimal RIFF/WAVE reader: 16-bit or 24-bit integer PCM, or 32-bit float.
+fn parse_wav(bytes: &[u8]) -> Result<(u32, u16, Samples), Box<dyn Error>> {
     if bytes.len() < 12 || &bytes[..4] != b"RIFF" || &bytes[8..12] != b"WAVE" {
         return Err("not a RIFF/WAVE file".into());
     }
@@ -89,27 +193,76 @@ fn parse_wav(bytes: &[u8]) -> Result<(u32, u16, Vec<i16>), Box<dyn Error>> {
                     u32_at(body + 4),
                     u16_at(body + 14),
                 );
-                if tag == 0xFFFE {
-                    const PCM_GUID: [u8; 16] = [
-                        0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10, 0x00, 0x80, 0x00, 0x00, 0xaa,
-                        0x00, 0x38, 0x9b, 0x71,
-                    ];
+                const PCM_GUID: [u8; 16] = [
+                    0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10, 0x00, 0x80, 0x00, 0x00, 0xaa, 0x00,
+                    0x38, 0x9b, 0x71,
+                ];
+                const FLOAT_GUID: [u8; 16] = [
+                    0x03, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10, 0x00, 0x80, 0x00, 0x00, 0xaa, 0x00,
+                    0x38, 0x9b, 0x71,
+                ];
+                let wav_format = if tag == 0xFFFE {
                     if len < 40
                         || body + 40 > bytes.len()
-                        || bytes[body + 24..body + 40] != PCM_GUID
+                        || (bytes[body + 24..body + 40] != PCM_GUID
+                            && bytes[body + 24..body + 40] != FLOAT_GUID)
                     {
                         return Err(
                             "unsupported WAV subformat (only integer PCM is supported)".into()
                         );
                     }
-                }
-                if !(tag == 1 || tag == 0xFFFE) || bits != 16 {
-                    return Err("only 16-bit PCM WAV is supported".into());
-                }
-                format = Some((rate, channels));
+                    if bytes[body + 24..body + 40] == PCM_GUID {
+                        match bits {
+                            16 => WavFormat::Pcm16,
+                            24 => WavFormat::Pcm24,
+                            _ => {
+                                return Err(
+                                    "only 16-bit PCM, 24-bit PCM or 32-bit float WAV is supported"
+                                        .into(),
+                                );
+                            }
+                        }
+                    } else {
+                        match bits {
+                            32 => WavFormat::Float32,
+                            _ => {
+                                return Err(
+                                    "only 16-bit PCM, 24-bit PCM or 32-bit float WAV is supported"
+                                        .into(),
+                                );
+                            }
+                        }
+                    }
+                } else if tag == 1 {
+                    match bits {
+                        16 => WavFormat::Pcm16,
+                        24 => WavFormat::Pcm24,
+                        _ => {
+                            return Err(
+                                "only 16-bit PCM, 24-bit PCM or 32-bit float WAV is supported"
+                                    .into(),
+                            );
+                        }
+                    }
+                } else if tag == 3 {
+                    match bits {
+                        32 => WavFormat::Float32,
+                        _ => {
+                            return Err(
+                                "only 16-bit PCM, 24-bit PCM or 32-bit float WAV is supported"
+                                    .into(),
+                            );
+                        }
+                    }
+                } else {
+                    return Err(
+                        "only 16-bit PCM, 24-bit PCM or 32-bit float WAV is supported".into(),
+                    );
+                };
+                format = Some((rate, channels, wav_format));
             }
             b"data" => {
-                let (rate, channels) = format.ok_or("data chunk before fmt chunk")?;
+                let (rate, channels, wav_format) = format.ok_or("data chunk before fmt chunk")?;
                 if len == 0 {
                     if end <= body {
                         return Err("no audio data".into());
@@ -119,12 +272,38 @@ fn parse_wav(bytes: &[u8]) -> Result<(u32, u16, Vec<i16>), Box<dyn Error>> {
                         end - body
                     );
                 }
-                let samples = bytes[body..end]
-                    .as_chunks::<2>()
-                    .0
-                    .iter()
-                    .map(|&b| i16::from_le_bytes(b))
-                    .collect();
+                let data = &bytes[body..end];
+                let samples = match wav_format {
+                    WavFormat::Pcm16 => Samples::I16(
+                        data.as_chunks::<2>()
+                            .0
+                            .iter()
+                            .map(|&b| i16::from_le_bytes(b))
+                            .collect(),
+                    ),
+                    WavFormat::Pcm24 => Samples::F32(
+                        data.as_chunks::<3>()
+                            .0
+                            .iter()
+                            .map(|&b| {
+                                let v = i32::from_le_bytes([
+                                    b[0],
+                                    b[1],
+                                    b[2],
+                                    if b[2] >= 0x80 { 0xff } else { 0x00 },
+                                ]);
+                                v as f32 / 8_388_608.0
+                            })
+                            .collect(),
+                    ),
+                    WavFormat::Float32 => Samples::F32(
+                        data.as_chunks::<4>()
+                            .0
+                            .iter()
+                            .map(|&b| f32::from_le_bytes(b))
+                            .collect(),
+                    ),
+                };
                 return Ok((rate, channels, samples));
             }
             _ => {}
