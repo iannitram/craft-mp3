@@ -2,6 +2,7 @@
 
 Newest first. One line per change of stage, release or decision that the next session needs.
 
+- 2026-11-12 1.1.0: gapless MP3 (#25: LAME-layout delay, padding and CRCs in the Info tag, encoder string `LAMEcraft`), each frame and its borrowed bytes kept within the decoder buffer (#24), the duplicate 2.038 s Info-tag test removed (#16). The API is unchanged. Tagged `v1.1.0` on the owner's ruling "Tag v1.1.0 + bump WavCraft (Recommended)" (2026-11-12), so WavCraft can pin it.
 - 2026-11-12 Gapless (#25): the Info/Xing tag carries LAME's layout fields (delay 528, padding, music length and CRCs) with the encoder string `LAMEcraft`, so ffmpeg-based players play the exact input length; the owner chose the LAME-prefixed marker. Opt-in ffmpeg check in tests/gapless.rs. Streams of two frames (empty or one-sample input) still don't open in ffmpeg, as on main.
 - 2026-11-11 Roadmap map: the roadmap now opens with a features block (encoder, provenance, docs, api, wav2mp3, ci, release) and its status says 1.0.0 is released, with #16 the one open issue.
 - 2026-11-03 1.0.0: first release. Huffman table source recorded (#4); docs fixed for MPEG-2 and the Info-tag duration (#5, #6, #7); public enums non_exhaustive (#8); chunked encode_i16/encode_planar (#9); wav2mp3 input checks (#10); CI on Mac, PC and Linux (#3); dead bitwriter removed (#2).
