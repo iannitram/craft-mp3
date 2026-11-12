@@ -44,7 +44,7 @@ Peers checked on 2026-11-12. Licences were read from each project's own reposito
 
 - **LAME**, LGPL-2.0 (GitHub mirror): the reference MP3 encoder; the feature bar and the source of the Info-tag layout and the borrowed constants.
 - **Shine**, LGPL-2.0 per its COPYING file (some package metadata says GPL-2.0): a small fixed-point encoder with a bitrate-only API (no VBR in its header), 16-bit input.
-- **ffmpeg**, LGPL-2.1 or later, with optional GPL parts: a decoder and muxer; it encodes MP3 only through its LAME and Shine wrappers (libmp3lame, libshine). It has no native MP3 encoder.
+- **ffmpeg**, LGPL-2.1 or later, with optional GPL parts: a decoder and muxer; it encodes MP3 only through wrappers and platform APIs: libmp3lame (LAME), libshine (Shine) and `mp3_mf` (Windows Media Foundation). It has no native MP3 encoder.
 - **Helix MP3 encoder** (RealNetworks), RPSL/RCSL terms, one copy at maikmerten/hmp3: RealNetworks' encoder, licensed under RPSL/RCSL; learn only. Its features were not checked (see docs/peers.md).
 - **mp3lame-encoder**, LGPL-3.0: a Rust wrapper over LAME.
 - **mp3lame-sys**, LGPL-3.0: the low-level Rust binding that builds LAME.
