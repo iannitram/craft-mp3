@@ -47,5 +47,5 @@ mod quantize;
 mod reservoir;
 mod tables;
 
-pub use encoder::{ConfigError, ENCODER_DELAY, Encoder, EncoderConfig};
+pub use encoder::{ConfigError, ENCODER_DELAY, Encoder, EncoderConfig, StereoMode};
 pub use info::InfoTag;
