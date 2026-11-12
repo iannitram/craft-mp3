@@ -1,6 +1,6 @@
 # Roadmap
 
-Updated: 2026-11-11
+Updated: 2026-11-12
 
 features:
 - encoder: The Layer III encoder: MPEG-1 and MPEG-2 rates, mono and joint stereo, CBR and VBR, the Info tag, CRC-16; pure Rust, no unsafe (SPEC M1, M2)
@@ -10,17 +10,34 @@ features:
 - wav2mp3: The wav2mp3 example and its input checks (items 9 to 11; SPEC M8)
 - ci: CI on Mac, PC and Linux, the test suite, and no dead code (items 12 and 13; SPEC M9, M10)
 - release: Releases: version, tag, and WavCraft and SoundCraft on the tag (item 14; SPEC M11)
+- tags: ID3v2.4 tags and chapters from WavCraft markers (After 1.0 item A1)
+- perf: Speed and quality measured against reference encoders, then tuned (After 1.0 item A2)
+- peers: Peer scan and prior art, each gap filed as an issue (After 1.0 item A3)
 
 The list for craft-mp3's first release, from the independent review of the encoder PR
 (2026-10-16). The spec for 1.0 is [SPEC.md](SPEC.md); each item below has an issue.
 The encoder itself passed the review: no bitstream bugs, and ffmpeg and symphonia
 agree on every stream checked.
 
-Where it stands (2026-11-11): 1.0.0 is released. Every item below is built and merged
-(PRs #12 to #22, 2026-11-02 to 2026-11-04), issues #2 to #11 are closed, the version is
-1.0.0 and the tag `v1.0.0` exists. One issue is open: #16, remove the duplicate test of
-the 2.038 s Info-tag duration (PRs #14 and #15 each added one). Nothing is planned for
-After 1.0 yet.
+Where it stands (2026-11-12): 1.0.0 is released. Every 1.0 item below is built and merged
+(PRs #12 to #22, 2026-11-02 to 2026-11-04), issues #2 to #11 and #16 are closed, and the
+tag `v1.0.0` exists. The gapless delay and padding fields (#25) and the decoder-buffer
+fix (#24) are merged; release 1.1.0 is in review (PR #28). The After 1.0 plan is below.
+
+## After 1.0
+
+These are planned, in milestone "After 1.0":
+
+- A1. *(#29)* **ID3v2.4 tags.** Title, artist, album, year and comment, and `CHAP`/`CTOC`
+  chapters so WavCraft markers become chapters. The tag goes in front of the Info frame,
+  so gapless playback and the Info tag's CRCs are unchanged.
+- A2. *(#30)* **Speed and quality pass.** A benchmark harness (encode time per minute of
+  audio) and objective quality measures (segmental SNR, a noise-to-mask proxy,
+  log-spectral distance, bandwidth) beside LAME and ffmpeg run as external reference
+  binaries only (no code copied). Targets are set after the first measurement.
+- A3. *(#31)* **Peer scan.** Compare LAME, Shine, ffmpeg and the Rust MP3 crates with
+  craft-mp3, start `SPEC.md` `## Prior art`, and file each gap worth having as its own
+  `from-peer` issue in this milestone.
 
 ## Before the first release (all done)
 
