@@ -39,6 +39,7 @@ mod filterbank;
 pub mod header;
 mod huffman;
 mod huffman_tables;
+mod id3;
 mod info;
 mod layout;
 mod mdct;
@@ -48,4 +49,5 @@ mod reservoir;
 mod tables;
 
 pub use encoder::{ConfigError, ENCODER_DELAY, Encoder, EncoderConfig, StereoMode};
+pub use id3::{Id3Error, Id3Tag, with_id3};
 pub use info::InfoTag;

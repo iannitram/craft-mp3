@@ -6,7 +6,7 @@ Describes commit: 05f6955 (2026-10-28). Checked against main on that date: modul
 
 ## Public API
 
-`src/lib.rs` re-exports `Encoder`, `EncoderConfig`, `ConfigError`, `StereoMode`, `ENCODER_DELAY` (1057 samples) from `encoder`, `InfoTag` from `info`, and the public `header` module (`FrameHeader`, `SampleRate`, `ChannelMode`, `Bitrate`, `PaddingSchedule`, `HeaderError`).
+`src/lib.rs` re-exports `Encoder`, `EncoderConfig`, `ConfigError`, `StereoMode`, `ENCODER_DELAY` (1057 samples) from `encoder`, `InfoTag` from `info`, `Id3Tag`, `Id3Error` and `with_id3` from `id3`, and the public `header` module (`FrameHeader`, `SampleRate`, `ChannelMode`, `Bitrate`, `PaddingSchedule`, `HeaderError`).
 
 ```
 EncoderConfig::new(rate, channels, kbps) | ::vbr(rate, channels, quality)
@@ -35,6 +35,7 @@ Users: WavCraft and SoundCraft (MP3 export), as a git dependency on a tag (SPEC 
 | `header` (public) | The 32-bit frame header, bitrates, sample rates, channel modes, frame sizing and padding schedule | bitstream |
 | `info` | The Xing/Info tag: frame and byte counts, seek table, LAME-layout delay, padding and CRCs (`LAMEcraft` marker), CRC-16 | bitstream, encoder (`ENCODER_DELAY`), header |
 | `tables` | Shared ISO constant tables (synthesis window D[i], Table B.3) | - |
+| `id3` (public: `Id3Tag`, `Id3Error`, `with_id3`) | ID3v2.4 tag in front of the stream: text frames, COMM, CTOC and CHAP chapters | - |
 | `bitwriter.rs` | Orphaned file, not compiled; removed by #2 | - |
 
 ```mermaid
@@ -69,7 +70,7 @@ flowchart LR
 
 ## The wav2mp3 example
 
-`examples/wav2mp3.rs`: reads a RIFF/WAVE file (`fmt `, `data` chunks), builds `EncoderConfig::new` or `::vbr`, encodes with `encode_i16`, writes the Info tag. Input hardening: #10.
+`examples/wav2mp3.rs`: reads a RIFF/WAVE file (`fmt `, `data` chunks; 16-bit or 24-bit PCM, or 32-bit float, #36), builds `EncoderConfig::new` or `::vbr`, encodes with `encode_i16` or `encode`, writes the Info tag. Input hardening: #10.
 
 ## Tests and CI
 
