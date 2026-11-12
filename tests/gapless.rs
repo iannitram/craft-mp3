@@ -133,7 +133,11 @@ fn check_stream(rate: u32, channels: u16, vbr: bool, per_channel: usize) {
     let side_info_len = FrameHeader::parse(mp3[..4].try_into().unwrap())
         .unwrap()
         .side_info_len();
-    assert_eq!(tag.tag_crc, crc16(&mp3[..4 + side_info_len + 154]), "{label}");
+    assert_eq!(
+        tag.tag_crc,
+        crc16(&mp3[..4 + side_info_len + 154]),
+        "{label}"
+    );
 
     // Decoded length, less the delay the decoder skips and the padding, is
     // the input: the field values are the ones ffmpeg uses.
