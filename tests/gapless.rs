@@ -71,8 +71,6 @@ fn crc16(bytes: &[u8]) -> u16 {
 struct Tag {
     id: [u8; 4],
     frame_len: usize,
-    /// The tag body, from the id through the tag CRC.
-    body: Vec<u8>,
     frames: u32,
     quality: u32,
     version: [u8; 9],
@@ -95,7 +93,6 @@ fn read_tag(mp3: &[u8]) -> Tag {
     Tag {
         id: frame[at..at + 4].try_into().unwrap(),
         frame_len,
-        body: frame[at..at + 156].to_vec(),
         frames: u32_at(8),
         quality: u32_at(116),
         version: frame[at + 120..at + 129].try_into().unwrap(),
@@ -133,7 +130,10 @@ fn check_stream(rate: u32, channels: u16, vbr: bool, per_channel: usize) {
 
     // The CRCs: music over the audio bytes, tag over the body before it.
     assert_eq!(tag.music_crc, crc16(&mp3[tag.frame_len..]), "{label}");
-    assert_eq!(tag.tag_crc, crc16(&tag.body[..154]), "{label}");
+    let side_info_len = FrameHeader::parse(mp3[..4].try_into().unwrap())
+        .unwrap()
+        .side_info_len();
+    assert_eq!(tag.tag_crc, crc16(&mp3[..4 + side_info_len + 154]), "{label}");
 
     // Decoded length, less the delay the decoder skips and the padding, is
     // the input: the field values are the ones ffmpeg uses.

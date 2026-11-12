@@ -167,7 +167,7 @@ const fn crc16_table() -> [u16; 256] {
 }
 
 /// The tag body, from the id on. With counts, the LAME extension follows the
-/// seek table and the tag CRC closes the body.
+/// seek table and the tag CRC closes the frame prefix.
 fn tag_body(vbr: bool, counts: Option<&Counts>) -> Vec<u8> {
     let id = if vbr { VBR_ID } else { CBR_ID };
     let Some(counts) = counts else {
@@ -195,8 +195,6 @@ fn tag_body(vbr: bool, counts: Option<&Counts>) -> Vec<u8> {
     body.extend_from_slice(&counts.music_len.to_be_bytes());
     body.extend_from_slice(&counts.music_crc.to_be_bytes());
     debug_assert_eq!(body.len(), TAG_CRC_COVERS);
-    let tag_crc = crc16(&body);
-    body.extend_from_slice(&tag_crc.to_be_bytes());
     body
 }
 
@@ -213,6 +211,11 @@ pub(crate) fn tag_frame(template: &FrameHeader, vbr: bool, counts: Option<&Count
     }
     let mut frame = w.into_bytes();
     frame.extend_from_slice(&tag_body(vbr, counts));
+    if counts.is_some() {
+        debug_assert_eq!(frame.len(), 4 + header.side_info_len() + TAG_CRC_COVERS);
+        let tag_crc = crc16(&frame);
+        frame.extend_from_slice(&tag_crc.to_be_bytes());
+    }
     frame.resize(header.frame_len(), 0);
     InfoTag { frame }
 }
@@ -324,7 +327,7 @@ mod tests {
         assert_eq!(&at_body(148)[..4], &418u32.to_be_bytes());
         assert_eq!(&at_body(152)[..2], &0x1234u16.to_be_bytes());
         let tag_crc = u16::from_be_bytes([at_body(154)[0], at_body(154)[1]]);
-        assert_eq!(tag_crc, crc16(&bytes[at..at + 154]));
+        assert_eq!(tag_crc, crc16(&bytes[..at + 154]));
     }
 
     #[test]
