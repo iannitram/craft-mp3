@@ -35,18 +35,49 @@ cargo run --release --example wav2mp3 -- input.wav output.mp3 [kbps | --vbr Q] [
   saves bits on easy frames for hard ones, per-frame mid/side stereo, and a
   bitrate-dependent lowpass.
 - A Xing/Info tag with frame count and seek table (built from the real
-  frame offsets for VBR), and optional CRC-16 frame protection.
+  frame offsets for VBR), LAME-layout delay and padding so gapless players
+  play the exact input length (see below), and optional CRC-16 frame
+  protection.
 
 About 25× realtime for stereo on one core.
 
 ## Delay and gapless playback
 
 Decoded audio lags the input by `ENCODER_DELAY` (1057) samples, and the end
-is padded with silence to a whole frame. The Info tag carries no gapless
-fields: decoders only honour LAME's delay/padding extension when the tag
-names LAME or libavcodec as the encoder. Players that need sample-exact
-gapless playback can trim `ENCODER_DELAY` samples from the start and keep
-the input length.
+is padded with silence to a whole frame. With the Info tag, the stream says
+both in LAME's tag layout, after the frame count and seek table:
+
+- the encoder delay, 528 (decoders add their own 529, so 1057 in all);
+- the padding: frames x 1152 (x 576 at MPEG-2 rates) less the input length
+  less 528, so the decoded length is the input's exactly;
+- the music length and a CRC-16 of the audio frames, and a CRC-16 of the tag
+  itself (from its id through the music CRC). Both use polynomial 0xA001,
+  initial value 0.
+
+The encoder string is `LAMEcraft`. It marks that the fields follow LAME's
+documented layout. It is not a claim that LAME encoded the file. ffmpeg
+applies the delay and padding only when the string starts with `LAME`,
+`Lavf` or `Lavc`, which is why the marker starts with `LAME`.
+
+What players do with it:
+
+- ffmpeg-based players (ffmpeg, libavformat, and players built on them)
+  skip the delay and drop the padding, so the stream plays for exactly the
+  input's length. The opt-in test `tests/gapless.rs` checks this with the
+  ffmpeg installed on the machine: `cargo test --test gapless -- --ignored`.
+- Players that ignore the extension play the delay and padding as silence,
+  as they did before. Those that check CRCs can verify the audio.
+- ffmpeg refuses to open a stream of only two frames, which is what an empty
+  or one-sample input gives. That was true before this change too.
+
+Without the Info tag (`EncoderConfig::info_tag` off) there are no fields, and
+a player that wants sample-exact playback can trim `ENCODER_DELAY` samples
+from the start and keep the input length.
+
+The layout follows LAME's documented tag format, written fresh for this
+crate. The approach comes from
+[audiobox-rs](https://github.com/jmsansan/audiobox-rs) (MIT), which first
+used the `LAME`-prefixed marker to make ffmpeg apply the fields.
 
 ## Quality
 
@@ -87,8 +118,9 @@ LAME".
 `cargo test` runs unit tests for every stage and round-trip tests that
 decode the output with an independent decoder (symphonia) and check it
 against the input: every sample rate, channel count and bitrate, pre-echo
-around transients, CRC streams and the Info tag. CI runs fmt, clippy and the
-tests on every pull request.
+around transients, CRC streams, the Info tag and its LAME-layout gapless
+fields. The ffmpeg check in `tests/gapless.rs` is opt-in (`--ignored`). CI runs
+fmt, clippy and the tests on every pull request.
 
 ## License
 

@@ -35,9 +35,10 @@ pub struct EncoderConfig {
     /// music) to 9 (smallest, about 65 kbit/s).
     pub vbr_quality: Option<u8>,
     /// Start the stream with a Xing "Info" tag frame giving players the
-    /// frame count and a seek table. The duration players show from it includes
-    /// the encoder delay ([`ENCODER_DELAY`], 1057 samples) and the padding up to
-    /// a whole frame, so a 2.000 s input shows about 2.038 s.
+    /// frame count and a seek table, and LAME's layout of the encoder delay
+    /// ([`ENCODER_DELAY`], 1057 samples) and the padding to a whole frame, so
+    /// players that read them play back the input's exact length. See the
+    /// README's "Delay and gapless playback".
     pub info_tag: bool,
     /// Protect each frame's header and side information with a CRC-16, so
     /// decoders can detect corruption. Costs 2 bytes per frame.
@@ -140,6 +141,8 @@ struct ChannelState {
     attacks: AttackDetector,
     /// Input samples waiting for a full frame plus lookahead.
     pending: Vec<f32>,
+    /// Input samples received, for the tag's padding.
+    input: u64,
 }
 
 /// A streaming MP3 encoder.
@@ -165,6 +168,11 @@ pub struct Encoder {
     info_tag: bool,
     /// Length of the tag frame, once written.
     tag_len: usize,
+    /// Where the tag frame was written in `out`; the audio follows it.
+    stream_start: usize,
+    /// LAME's quality indicator for the tag: 100 for CBR, 100 less 10 per
+    /// VBR quality step.
+    lame_quality: u8,
     /// Length of every audio frame so far, for the tag.
     frame_lengths: Vec<u32>,
     /// How far, in dB, recent frames have had to relax their noise targets
@@ -219,6 +227,8 @@ impl Encoder {
                 .map(|q| VBR_BEST_DB + f32::from(q) * VBR_STEP_DB),
             info_tag: config.info_tag,
             tag_len: 0,
+            stream_start: 0,
+            lame_quality: config.vbr_quality.map_or(100, |q| 100 - 10 * q),
             frame_lengths: Vec::new(),
             pressure_db: 0.0,
             next_channel: 0,
@@ -243,6 +253,7 @@ impl Encoder {
             let ch = self.next_channel;
             let state = &mut self.channels[ch];
             state.pending.push(sample);
+            state.input += 1;
             state.attacks.push(sample);
             self.next_channel = (ch + 1) % n;
             if ch == n - 1 && state.pending.len() == self.template.samples() + LOOKAHEAD {
@@ -306,6 +317,8 @@ impl Encoder {
         while self.next_channel != 0 {
             self.encode(&[0.0], out);
         }
+        // Every channel now holds the same number of input samples.
+        let input = self.channels[0].input;
         // Buffered samples plus the filterbank delay must all reach a frame,
         // and the last frame needs its lookahead too.
         let buffered = self.channels[0].pending.len();
@@ -315,14 +328,25 @@ impl Encoder {
         let zeros = vec![0.0; silence * self.channels.len()];
         self.encode(&zeros, out);
         self.reservoir.drain_all(out);
-        self.info_tag.then(|| {
-            let counts = info::Counts::from_frame_lengths(self.tag_len, &self.frame_lengths);
-            info::tag_frame(
-                &self.tag_template(),
-                self.vbr_relax_db.is_some(),
-                Some(&counts),
-            )
-        })
+        if !self.info_tag {
+            return None;
+        }
+        // The frames decode to whole frames of samples; the tag's delay and
+        // the padding account for the rest, so the decoded length is `input`.
+        let decoded = self.frame_lengths.len() as u64 * self.template.samples() as u64;
+        let padding = decoded.saturating_sub(input + info::DELAY_FIELD as u64);
+        debug_assert!(padding <= u64::from(info::MAX_PADDING));
+        let audio = &out[self.stream_start + self.tag_len..];
+        let mut counts = info::Counts::from_frame_lengths(self.tag_len, &self.frame_lengths);
+        counts.padding = padding as u32;
+        counts.music_len = u32::try_from(audio.len()).unwrap_or(u32::MAX);
+        counts.music_crc = info::crc16(audio);
+        counts.quality = self.lame_quality;
+        Some(info::tag_frame(
+            &self.tag_template(),
+            self.vbr_relax_db.is_some(),
+            Some(&counts),
+        ))
     }
 
     /// The header the tag frame is sized from: for VBR the smallest frame,
@@ -367,6 +391,7 @@ impl Encoder {
         if self.info_tag && self.tag_len == 0 {
             let placeholder =
                 info::tag_frame(&self.tag_template(), self.vbr_relax_db.is_some(), None);
+            self.stream_start = out.len();
             out.extend_from_slice(placeholder.as_bytes());
             self.tag_len = placeholder.as_bytes().len();
         }
