@@ -69,7 +69,7 @@ flowchart LR
 
 ## The wav2mp3 example
 
-`examples/wav2mp3.rs`: reads a RIFF/WAVE file (`fmt `, `data` chunks), builds `EncoderConfig::new` or `::vbr`, encodes with `encode_i16`, writes the Info tag. Input hardening: #10.
+`examples/wav2mp3.rs`: reads a RIFF/WAVE file (`fmt `, `data` chunks; 16-bit or 24-bit PCM, or 32-bit float, #36), builds `EncoderConfig::new` or `::vbr`, encodes with `encode_i16` or `encode`, writes the Info tag. Input hardening: #10.
 
 ## Tests and CI
 
