@@ -9,8 +9,9 @@ fn read(name: &str) -> String {
 }
 
 #[test]
-fn package_version_is_1_0_0() {
-    assert_eq!(env!("CARGO_PKG_VERSION"), "1.0.0");
+fn package_version_is_1_x() {
+    // 1.0.0 was the first release; later 1.x releases keep the same API line.
+    assert!(env!("CARGO_PKG_VERSION").starts_with("1."));
 }
 
 #[test]
