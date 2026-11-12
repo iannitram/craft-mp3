@@ -2,12 +2,55 @@
 //!
 //! ```text
 //! cargo run --release --example wav2mp3 -- input.wav output.mp3 [kbps | --vbr Q] [--crc]
+//!     [--title T] [--artist A] [--album L] [--year YYYY] [--comment C]
+//!     [--chapter "name@seconds"]...
 //! ```
+//!
+//! The tag flags write an ID3v2.4 tag in front of the stream; without them
+//! the output has no tag.
 
 use std::error::Error;
 use std::fs;
 
-use craft_mp3::{Encoder, EncoderConfig};
+use craft_mp3::{Encoder, EncoderConfig, Id3Tag, with_id3};
+
+/// Removes `flag value` from `args` and returns the value, if the flag is in
+/// there. Removing it first keeps it out of the positional arguments.
+fn take_value(args: &mut Vec<String>, flag: &str) -> Result<Option<String>, Box<dyn Error>> {
+    match args.iter().position(|a| a == flag) {
+        Some(i) if i + 1 < args.len() => {
+            let value = args.remove(i + 1);
+            args.remove(i);
+            Ok(Some(value))
+        }
+        Some(_) => Err(format!("{flag} needs a value").into()),
+        None => Ok(None),
+    }
+}
+
+/// Removes every `flag value` pair from `args` and returns the values in order.
+fn take_all(args: &mut Vec<String>, flag: &str) -> Result<Vec<String>, Box<dyn Error>> {
+    let mut values = Vec::new();
+    while let Some(value) = take_value(args, flag)? {
+        values.push(value);
+    }
+    Ok(values)
+}
+
+/// Parses `name@seconds` into the chapter's name and its start in samples.
+fn parse_chapter(spec: &str, sample_rate: u32) -> Result<(String, u64), Box<dyn Error>> {
+    let (name, seconds) = spec
+        .rsplit_once('@')
+        .ok_or_else(|| format!("--chapter {spec:?} needs the form name@seconds"))?;
+    let seconds: f64 = seconds
+        .parse()
+        .map_err(|_| format!("--chapter {spec:?}: {seconds:?} is not a time in seconds"))?;
+    if !seconds.is_finite() || seconds < 0.0 {
+        return Err(format!("--chapter {spec:?}: the time must be zero or more seconds").into());
+    }
+    let start = (seconds * f64::from(sample_rate)).round() as u64;
+    Ok((name.to_owned(), start))
+}
 
 fn run() -> Result<(), Box<dyn Error>> {
     let mut args: Vec<String> = std::env::args().collect();
@@ -22,8 +65,16 @@ fn run() -> Result<(), Box<dyn Error>> {
         Some(_) => return Err("--vbr needs a quality from 0 to 9".into()),
         None => None,
     };
+    let title = take_value(&mut args, "--title")?;
+    let artist = take_value(&mut args, "--artist")?;
+    let album = take_value(&mut args, "--album")?;
+    let year = take_value(&mut args, "--year")?
+        .map(|y| y.parse::<u16>())
+        .transpose()?;
+    let comment = take_value(&mut args, "--comment")?;
+    let chapters = take_all(&mut args, "--chapter")?;
     let [_, input, output, rest @ ..] = args.as_slice() else {
-        return Err("usage: wav2mp3 <input.wav> <output.mp3> [kbps | --vbr Q] [--crc]".into());
+        return Err("usage: wav2mp3 <input.wav> <output.mp3> [kbps | --vbr Q] [--crc] [--title T] [--artist A] [--album L] [--year YYYY] [--comment C] [--chapter name@seconds]...".into());
     };
     let bitrate_kbps = rest.first().map_or(Ok(128), |s| s.parse())?;
 
@@ -45,9 +96,43 @@ fn run() -> Result<(), Box<dyn Error>> {
     let mut encoder = Encoder::new(config)?;
     let mut mp3 = Vec::new();
     encoder.encode_i16(&samples, &mut mp3);
-    if let Some(tag) = encoder.finish(&mut mp3) {
-        tag.write_to(&mut mp3);
+    if let Some(info) = encoder.finish(&mut mp3) {
+        info.write_to(&mut mp3);
     }
+
+    let tagged = title.is_some()
+        || artist.is_some()
+        || album.is_some()
+        || year.is_some()
+        || comment.is_some()
+        || !chapters.is_empty();
+    let mp3 = if tagged {
+        let mut tag = Id3Tag::new();
+        if let Some(t) = &title {
+            tag = tag.title(t);
+        }
+        if let Some(a) = &artist {
+            tag = tag.artist(a);
+        }
+        if let Some(l) = &album {
+            tag = tag.album(l);
+        }
+        if let Some(y) = year {
+            tag = tag.year(y);
+        }
+        if let Some(c) = &comment {
+            tag = tag.comment(c);
+        }
+        for spec in &chapters {
+            let (name, start) = parse_chapter(spec, sample_rate)?;
+            tag = tag.chapter(&name, start, None);
+        }
+        // Times are per channel, so the input length is the frame count.
+        let frames = samples.len() / usize::from(channels).max(1);
+        with_id3(&tag, &mp3, sample_rate, frames as u64)?
+    } else {
+        mp3
+    };
     fs::write(output, &mp3)?;
     Ok(())
 }

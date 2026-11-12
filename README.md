@@ -18,6 +18,8 @@ To convert a WAV file:
 
 ```text
 cargo run --release --example wav2mp3 -- input.wav output.mp3 [kbps | --vbr Q] [--crc]
+    [--title T] [--artist A] [--album L] [--year YYYY] [--comment C]
+    [--chapter "name@seconds"]...
 ```
 
 ## What it does
@@ -79,6 +81,43 @@ crate. The approach comes from
 [audiobox-rs](https://github.com/jmsansan/audiobox-rs) (MIT), which first
 used the `LAME`-prefixed marker to make ffmpeg apply the fields.
 
+## ID3v2 tags and chapters
+
+`Id3Tag` writes an ID3v2.4 tag in front of the stream: title (TIT2), artist
+(TPE1), album (TALB), recording year (TDRC, `YYYY`), a comment (COMM, language
+`und`), and chapters. `with_id3` puts the tag's bytes in front of the stream,
+so the Info frame stays the first audio frame and gapless playback is
+unchanged.
+
+```rust
+use craft_mp3::{Id3Tag, with_id3};
+
+// After encoder.finish(&mut mp3) and info.write_to(&mut mp3):
+let tag = Id3Tag::new()
+    .title("Café – 東京")
+    .artist("Ian Martin")
+    .chapter("Intro", 0, Some(441_000))  // name, start, end (samples)
+    .chapter("Verse", 441_000, None);    // no end: ends at the next start
+let file = with_id3(&tag, &mp3, 44_100, input_len)?; // input_len per channel
+```
+
+- Chapter times are in samples of the input, before the 1057-sample encoder
+  delay; the tag converts them to milliseconds, rounded to the nearest
+  millisecond with halves going up. The CTOC frame lists the chapters in
+  order (at most 255), each CHAP frame carrying its title in a TIT2
+  sub-frame. Chapters given out of order are sorted by start.
+- A chapter with no end ends where the next one starts, and the last one at
+  `total_samples`.
+- `Id3Tag::to_bytes` and `with_id3` return `Id3Error` rather than writing a
+  bad tag: a NUL in a text field, a year above 9999, a chapter past the end
+  of the stream, more than 255 chapters, or a tag larger than 2^28 - 1 bytes.
+- Only UTF-8 text is written, with no unsynchronisation, extended header,
+  compression or padding.
+
+`wav2mp3` takes the same fields: `--title`, `--artist`, `--album`,
+`--year`, `--comment`, and `--chapter "name@seconds"` (repeatable). Without
+any of them the output has no tag.
+
 ## Quality
 
 Measured on synthetic test material by the share of critical bands whose
@@ -119,7 +158,9 @@ LAME".
 decode the output with an independent decoder (symphonia) and check it
 against the input: every sample rate, channel count and bitrate, pre-echo
 around transients, CRC streams, the Info tag and its LAME-layout gapless
-fields. The ffmpeg check in `tests/gapless.rs` is opt-in (`--ignored`). CI runs
+fields. The ffmpeg check in `tests/gapless.rs` is opt-in (`--ignored`), and
+`tests/id3.rs` reads the tags back with symphonia (and, opt-in, with ffprobe
+and ffmpeg: `cargo test --test id3 -- --ignored`). CI runs
 fmt, clippy and the tests on every pull request.
 
 ## License
