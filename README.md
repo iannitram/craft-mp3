@@ -95,7 +95,7 @@ use craft_mp3::{Id3Tag, with_id3};
 // After encoder.finish(&mut mp3) and info.write_to(&mut mp3):
 let tag = Id3Tag::new()
     .title("Café – 東京")
-    .artist("Ian Martin")
+    .artist("Test Artist")
     .chapter("Intro", 0, Some(441_000))  // name, start, end (samples)
     .chapter("Verse", 441_000, None);    // no end: ends at the next start
 let file = with_id3(&tag, &mp3, 44_100, input_len)?; // input_len per channel

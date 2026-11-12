@@ -121,10 +121,10 @@ fn tagged(mp3: &[u8], tag: &Id3Tag, frames: usize) -> Vec<u8> {
 #[test]
 fn title_and_artist_read_back_through_symphonia() {
     let mp3 = encode(LENGTH);
-    let tag = Id3Tag::new().title("Morning Tone").artist("Ian Martin");
+    let tag = Id3Tag::new().title("Morning Tone").artist("Test Artist");
     let decoded = decode(tagged(&mp3, &tag, LENGTH));
     assert_eq!(decoded.title.as_deref(), Some("Morning Tone"));
-    assert_eq!(decoded.artist.as_deref(), Some("Ian Martin"));
+    assert_eq!(decoded.artist.as_deref(), Some("Test Artist"));
 }
 
 #[test]
@@ -170,7 +170,7 @@ fn ffprobe_and_ffmpeg_read_the_tagged_file() {
     }
     let tag = Id3Tag::new()
         .title("Café – 東京")
-        .artist("Ian Martin")
+        .artist("Test Artist")
         .chapter("Intro", 0, Some(44_100))
         .chapter("Verse", 44_100, None)
         .chapter("Outro", 88_200, None);
@@ -199,7 +199,7 @@ fn ffprobe_and_ffmpeg_read_the_tagged_file() {
     );
     assert_eq!(
         format.get("TAG:artist").map(String::as_str),
-        Some("Ian Martin")
+        Some("Test Artist")
     );
 
     let expected = [
@@ -295,7 +295,7 @@ fn wav2mp3_tag_flags_write_the_tag_in_front_of_the_info_frame() {
             "--title",
             "Café – 東京",
             "--artist",
-            "Ian Martin",
+            "Test Artist",
             "--chapter",
             "Intro@0",
             "--chapter",
@@ -315,7 +315,7 @@ fn wav2mp3_tag_flags_write_the_tag_in_front_of_the_info_frame() {
     );
     let decoded = decode(mp3.clone());
     assert_eq!(decoded.title.as_deref(), Some("Café – 東京"));
-    assert_eq!(decoded.artist.as_deref(), Some("Ian Martin"));
+    assert_eq!(decoded.artist.as_deref(), Some("Test Artist"));
     assert_eq!(mp3.windows(4).filter(|w| *w == b"CHAP").count(), 2);
     assert_eq!(mp3.windows(4).filter(|w| *w == b"CTOC").count(), 1);
 }
