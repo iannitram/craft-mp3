@@ -71,6 +71,10 @@ flowchart LR
 
 `examples/wav2mp3.rs`: reads a RIFF/WAVE file (`fmt `, `data` chunks), builds `EncoderConfig::new` or `::vbr`, encodes with `encode_i16`, writes the Info tag. Input hardening: #10.
 
+## Benchmarks
+
+`examples/bench.rs` (speed and quality against LAME and ffmpeg run as external binaries) and `examples/bench/metrics.rs` (segmental SNR, log-spectral distance, bandwidth, delay alignment). `src/analysis.rs` is a `#[doc(hidden)]` hook that gives the harness the noise-to-mask proxy and the lowpass. `tests/bench_metrics.rs` and `tests/bench_smoke.rs` test them; see [benchmarks.md](benchmarks.md).
+
 ## Tests and CI
 
 - `tests/roundtrip.rs`: decode every sample rate, channel count and bitrate with symphonia and compare; pre-echo, CRC and Info-tag checks.

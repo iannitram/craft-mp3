@@ -629,6 +629,14 @@ fn cutoff_hz(kbps_per_channel: u32) -> f32 {
     f0 + (f1 - f0) * (kbps_per_channel - k0) as f32 / (k1 - k0) as f32
 }
 
+/// The lowpass cutoff in Hz that `config` gets (for the benchmark harness).
+pub(crate) fn lowpass_cutoff_hz(config: &EncoderConfig) -> f32 {
+    cutoff_hz(match config.vbr_quality {
+        Some(q) => VBR_TYPICAL_KBPS[usize::from(q.min(9))] / 2,
+        None => config.bitrate_kbps / u32::from(config.channels.max(1)),
+    })
+}
+
 /// Per-line weights, in bitstream order for `block`: a short linear taper
 /// ending at the cutoff.
 fn lowpass(layout: &Layout, block: BlockType, kbps_per_channel: u32) -> Box<[f32; GRANULE_LINES]> {

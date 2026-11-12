@@ -32,6 +32,8 @@
 
 #![forbid(unsafe_code)]
 
+#[doc(hidden)]
+pub mod analysis;
 mod attack;
 mod bitstream;
 mod encoder;
