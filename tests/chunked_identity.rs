@@ -96,3 +96,54 @@ fn encode_planar_mono_matches_encode_on_samples() {
     assert!(actual.len() > 10_000);
     assert_eq!(actual, expected);
 }
+
+#[test]
+fn writer_matches_encode() {
+    use std::io::Write;
+
+    let config = EncoderConfig::new(44_100, 2, 128);
+    let left = sine(440.0, 16_000.0);
+    let right = sine(440.0, 8_000.0);
+    let samples: Vec<i16> = left
+        .iter()
+        .zip(&right)
+        .flat_map(|(&l, &r)| [l as i16, r as i16])
+        .collect();
+    let scaled: Vec<f32> = samples.iter().map(|&s| f32::from(s) / 32768.0).collect();
+
+    let mut encoder = Encoder::new(config).unwrap();
+    let mut expected = Vec::new();
+    encoder.encode(&scaled, &mut expected);
+    if let Some(tag) = encoder.finish(&mut expected) {
+        tag.write_to(&mut expected);
+    }
+
+    // Interleaved i16 bytes through Writer.
+    let encoder = Encoder::new(config).unwrap();
+    let cursor = std::io::Cursor::new(Vec::new());
+    let mut writer = craft_mp3::Writer::new(encoder, cursor);
+    let bytes: Vec<u8> = samples.iter().flat_map(|&s| s.to_le_bytes()).collect();
+
+    for chunk in bytes.chunks(1024) {
+        writer.write_all(chunk).unwrap();
+    }
+    let cursor = writer.finish().unwrap();
+    let actual = cursor.into_inner();
+
+    assert!(actual.len() > 10_000);
+    assert_eq!(actual, expected);
+
+    // Interleaved f32 bytes through Writer::new_f32.
+    let encoder = Encoder::new(config).unwrap();
+    let cursor = std::io::Cursor::new(Vec::new());
+    let mut writer = craft_mp3::Writer::new_f32(encoder, cursor);
+    let float_bytes: Vec<u8> = scaled.iter().flat_map(|&s| s.to_le_bytes()).collect();
+
+    for chunk in float_bytes.chunks(1024) {
+        writer.write_all(chunk).unwrap();
+    }
+    let cursor = writer.finish().unwrap();
+    let actual_f32 = cursor.into_inner();
+
+    assert_eq!(actual_f32, expected);
+}

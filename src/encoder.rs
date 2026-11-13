@@ -2,6 +2,7 @@
 
 use std::f32::consts::FRAC_1_SQRT_2;
 use std::fmt;
+use std::io::{self, Seek, SeekFrom, Write};
 
 use crate::attack::AttackDetector;
 use crate::bitstream::BitWriter;
@@ -211,6 +212,10 @@ pub struct Encoder {
     /// Maximum absolute sample value seen in the input, for ReplayGain.
     peak: f32,
     stereo_mode: StereoMode,
+    /// Total bytes of audio frames emitted after the tag frame.
+    music_len: u32,
+    /// Running CRC-16 of those audio bytes.
+    music_crc: u16,
 }
 
 impl Encoder {
@@ -276,6 +281,8 @@ impl Encoder {
             next_channel: 0,
             peak: 0.0,
             stereo_mode: config.stereo_mode,
+            music_len: 0,
+            music_crc: 0,
         })
     }
 
@@ -372,7 +379,11 @@ impl Encoder {
         let silence = frames * frame + LOOKAHEAD - buffered;
         let zeros = vec![0.0; silence * self.channels.len()];
         self.encode(&zeros, out);
+        let drain_start = out.len();
         self.reservoir.drain_all(out);
+        let drained = &out[drain_start..];
+        self.music_len = self.music_len.saturating_add(drained.len() as u32);
+        self.music_crc = info::crc16_update(self.music_crc, drained);
         if !self.info_tag {
             return None;
         }
@@ -381,11 +392,10 @@ impl Encoder {
         let decoded = self.frame_lengths.len() as u64 * self.template.samples() as u64;
         let padding = decoded.saturating_sub(input + info::DELAY_FIELD as u64);
         debug_assert!(padding <= u64::from(info::MAX_PADDING));
-        let audio = &out[self.stream_start + self.tag_len..];
         let mut counts = info::Counts::from_frame_lengths(self.tag_len, &self.frame_lengths);
         counts.padding = padding as u32;
-        counts.music_len = u32::try_from(audio.len()).unwrap_or(u32::MAX);
-        counts.music_crc = info::crc16(audio);
+        counts.music_len = self.music_len;
+        counts.music_crc = self.music_crc;
         counts.quality = self.lame_quality;
         if self.replaygain {
             counts.peak = self.peak;
@@ -645,7 +655,310 @@ impl Encoder {
         debug_assert_eq!(head.len(), header.frame_len() - slot_len);
 
         self.reservoir.push(&head, slot_len, main_data.as_bytes());
+        let drain_start = out.len();
         self.reservoir.drain_finished(out);
+        let drained = &out[drain_start..];
+        self.music_len = self.music_len.saturating_add(drained.len() as u32);
+        self.music_crc = info::crc16_update(self.music_crc, drained);
+    }
+
+    /// Creates a [`Writer`] that encodes interleaved audio samples written to it
+    /// as MPEG-1 or MPEG-2 Layer III frames and writes them to `writer`.
+    ///
+    /// By default, samples are expected as interleaved 16-bit little-endian
+    /// PCM (`i16`). Use [`into_writer_with_format`](Self::into_writer_with_format) or
+    /// [`Writer::new_f32`] for 32-bit float (`f32`) PCM.
+    pub fn into_writer<W: Write>(self, writer: W) -> Writer<W> {
+        Writer::new(self, writer)
+    }
+
+    /// Creates a [`Writer`] that encodes audio samples with the specified [`SampleFormat`].
+    pub fn into_writer_with_format<W: Write>(self, writer: W, format: SampleFormat) -> Writer<W> {
+        Writer::with_sample_format(self, writer, format)
+    }
+}
+
+/// The sample format expected by [`Writer::write`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Hash)]
+#[non_exhaustive]
+pub enum SampleFormat {
+    /// Interleaved 16-bit signed integer PCM in little-endian byte order (default).
+    #[default]
+    I16,
+    /// Interleaved 32-bit IEEE 754 floating-point PCM in little-endian byte order.
+    F32,
+}
+
+/// An adapter that implements [`std::io::Write`] for streaming audio samples into
+/// an [`Encoder`] and writing completed MP3 frames to an underlying writer.
+///
+/// By default, samples are expected as interleaved 16-bit little-endian PCM (`i16`).
+/// Use [`Writer::new_f32`] or [`Writer::with_sample_format`] to encode 32-bit float (`f32`)
+/// PCM instead.
+///
+/// Call [`Writer::finish`] to encode the final frames and rewrite the Xing/Info
+/// tag at the beginning of the stream.
+///
+/// ```
+/// use std::io::{Cursor, Write};
+/// use craft_mp3::{Encoder, EncoderConfig, Writer};
+///
+/// let encoder = Encoder::new(EncoderConfig::new(44_100, 2, 128))?;
+/// let cursor = Cursor::new(Vec::new());
+/// let mut writer = Writer::new(encoder, cursor);
+///
+/// // Interleaved 16-bit PCM bytes (left, right, left, right...).
+/// let pcm = [0u8; 4608];
+/// writer.write_all(&pcm)?;
+/// let cursor = writer.finish()?;
+/// let mp3 = cursor.into_inner();
+/// assert!(!mp3.is_empty());
+/// # Ok::<(), Box<dyn std::error::Error>>(())
+/// ```
+pub struct Writer<W> {
+    encoder: Encoder,
+    inner: W,
+    format: SampleFormat,
+    tail: [u8; 4],
+    tail_len: usize,
+    chunk: Vec<f32>,
+    mp3_buf: Vec<u8>,
+    start_pos: u64,
+}
+
+/// Alias for [`Writer`].
+pub type EncoderWriter<W> = Writer<W>;
+
+impl<W: Write> Writer<W> {
+    /// Creates a writer wrapping `encoder` and writing MP3 frames to `inner`.
+    ///
+    /// By default, expects interleaved 16-bit little-endian PCM (`i16`).
+    pub fn new(encoder: Encoder, inner: W) -> Self {
+        Self::with_sample_format(encoder, inner, SampleFormat::I16)
+    }
+
+    /// Creates a writer expecting interleaved 16-bit little-endian PCM (`i16`).
+    pub fn new_i16(encoder: Encoder, inner: W) -> Self {
+        Self::with_sample_format(encoder, inner, SampleFormat::I16)
+    }
+
+    /// Creates a writer expecting interleaved 32-bit little-endian float PCM (`f32`).
+    pub fn new_f32(encoder: Encoder, inner: W) -> Self {
+        Self::with_sample_format(encoder, inner, SampleFormat::F32)
+    }
+
+    /// Creates a writer with an explicit [`SampleFormat`].
+    pub fn with_sample_format(encoder: Encoder, inner: W, format: SampleFormat) -> Self {
+        Self {
+            encoder,
+            inner,
+            format,
+            tail: [0; 4],
+            tail_len: 0,
+            chunk: Vec::with_capacity(CHUNK),
+            mp3_buf: Vec::new(),
+            start_pos: 0,
+        }
+    }
+
+    /// Sets the byte offset in the underlying writer where the MP3 stream starts.
+    ///
+    /// By default, `0`. [`finish`](Self::finish) seeks back to this offset to write
+    /// the completed Info tag.
+    pub fn with_start_pos(mut self, pos: u64) -> Self {
+        self.start_pos = pos;
+        self
+    }
+
+    /// Sets the byte offset in the underlying writer where the MP3 stream starts.
+    pub fn set_start_pos(&mut self, pos: u64) {
+        self.start_pos = pos;
+    }
+
+    /// Borrows the underlying writer.
+    pub fn get_ref(&self) -> &W {
+        &self.inner
+    }
+
+    /// Mutably borrows the underlying writer.
+    pub fn get_mut(&mut self) -> &mut W {
+        &mut self.inner
+    }
+
+    /// Consumes this writer, returning the underlying writer without finishing the stream.
+    pub fn into_inner(self) -> W {
+        self.inner
+    }
+
+    fn flush_tail(&mut self) -> io::Result<()> {
+        if self.tail_len > 0 {
+            let sample = match self.format {
+                SampleFormat::I16 => {
+                    self.tail[self.tail_len..2].fill(0);
+                    let s = i16::from_le_bytes([self.tail[0], self.tail[1]]);
+                    f32::from(s) / 32768.0
+                }
+                SampleFormat::F32 => {
+                    self.tail[self.tail_len..4].fill(0);
+                    f32::from_le_bytes(self.tail)
+                }
+            };
+            self.tail_len = 0;
+            self.chunk.push(sample);
+            self.encoder.encode(&self.chunk, &mut self.mp3_buf);
+            self.chunk.clear();
+            if !self.mp3_buf.is_empty() {
+                self.inner.write_all(&self.mp3_buf)?;
+                self.mp3_buf.clear();
+            }
+        }
+        Ok(())
+    }
+
+    /// Finishes encoding the stream and writes the final frames to the underlying
+    /// writer, but does not seek back to rewrite the Info tag.
+    ///
+    /// Useful for unseekable destinations like network sockets.
+    pub fn finish_unseekable(mut self) -> io::Result<W> {
+        self.flush_tail()?;
+        self.encoder.finish(&mut self.mp3_buf);
+        if !self.mp3_buf.is_empty() {
+            self.inner.write_all(&self.mp3_buf)?;
+            self.mp3_buf.clear();
+        }
+        self.inner.flush()?;
+        Ok(self.inner)
+    }
+}
+
+impl<W: Write + Seek> Writer<W> {
+    /// Finishes encoding the stream, writing any remaining frames and the
+    /// completed Info tag to the underlying writer, and returning the underlying writer.
+    pub fn finish(mut self) -> io::Result<W> {
+        self.flush_tail()?;
+        let tag = self.encoder.finish(&mut self.mp3_buf);
+        if !self.mp3_buf.is_empty() {
+            self.inner.write_all(&self.mp3_buf)?;
+            self.mp3_buf.clear();
+        }
+        if let Some(tag) = tag {
+            self.inner.seek(SeekFrom::Start(self.start_pos))?;
+            self.inner.write_all(tag.as_bytes())?;
+            self.inner.seek(SeekFrom::End(0))?;
+        }
+        self.inner.flush()?;
+        Ok(self.inner)
+    }
+}
+
+impl<W: Write> Write for Writer<W> {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        if buf.is_empty() {
+            return Ok(0);
+        }
+
+        let mut input = buf;
+
+        match self.format {
+            SampleFormat::I16 => {
+                if self.tail_len > 0 {
+                    let needed = 2 - self.tail_len;
+                    if input.len() < needed {
+                        self.tail[self.tail_len..self.tail_len + input.len()]
+                            .copy_from_slice(input);
+                        self.tail_len += input.len();
+                        return Ok(buf.len());
+                    }
+                    self.tail[self.tail_len..2].copy_from_slice(&input[..needed]);
+                    input = &input[needed..];
+                    self.tail_len = 0;
+                    let s = i16::from_le_bytes([self.tail[0], self.tail[1]]);
+                    self.chunk.push(f32::from(s) / 32768.0);
+                }
+
+                let (pairs, remainder) = input.as_chunks::<2>();
+                for &pair in pairs {
+                    let s = i16::from_le_bytes(pair);
+                    self.chunk.push(f32::from(s) / 32768.0);
+                    if self.chunk.len() == CHUNK {
+                        self.encoder.encode(&self.chunk, &mut self.mp3_buf);
+                        self.chunk.clear();
+                        if !self.mp3_buf.is_empty() {
+                            self.inner.write_all(&self.mp3_buf)?;
+                            self.mp3_buf.clear();
+                        }
+                    }
+                }
+
+                if !self.chunk.is_empty() {
+                    self.encoder.encode(&self.chunk, &mut self.mp3_buf);
+                    self.chunk.clear();
+                    if !self.mp3_buf.is_empty() {
+                        self.inner.write_all(&self.mp3_buf)?;
+                        self.mp3_buf.clear();
+                    }
+                }
+
+                if !remainder.is_empty() {
+                    self.tail[..remainder.len()].copy_from_slice(remainder);
+                    self.tail_len = remainder.len();
+                }
+            }
+            SampleFormat::F32 => {
+                if self.tail_len > 0 {
+                    let needed = 4 - self.tail_len;
+                    if input.len() < needed {
+                        self.tail[self.tail_len..self.tail_len + input.len()]
+                            .copy_from_slice(input);
+                        self.tail_len += input.len();
+                        return Ok(buf.len());
+                    }
+                    self.tail[self.tail_len..4].copy_from_slice(&input[..needed]);
+                    input = &input[needed..];
+                    self.tail_len = 0;
+                    let s = f32::from_le_bytes(self.tail);
+                    self.chunk.push(s);
+                }
+
+                let (quads, remainder) = input.as_chunks::<4>();
+                for &quad in quads {
+                    let s = f32::from_le_bytes(quad);
+                    self.chunk.push(s);
+                    if self.chunk.len() == CHUNK {
+                        self.encoder.encode(&self.chunk, &mut self.mp3_buf);
+                        self.chunk.clear();
+                        if !self.mp3_buf.is_empty() {
+                            self.inner.write_all(&self.mp3_buf)?;
+                            self.mp3_buf.clear();
+                        }
+                    }
+                }
+
+                if !self.chunk.is_empty() {
+                    self.encoder.encode(&self.chunk, &mut self.mp3_buf);
+                    self.chunk.clear();
+                    if !self.mp3_buf.is_empty() {
+                        self.inner.write_all(&self.mp3_buf)?;
+                        self.mp3_buf.clear();
+                    }
+                }
+
+                if !remainder.is_empty() {
+                    self.tail[..remainder.len()].copy_from_slice(remainder);
+                    self.tail_len = remainder.len();
+                }
+            }
+        }
+
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        if !self.mp3_buf.is_empty() {
+            self.inner.write_all(&self.mp3_buf)?;
+            self.mp3_buf.clear();
+        }
+        self.inner.flush()
     }
 }
 
