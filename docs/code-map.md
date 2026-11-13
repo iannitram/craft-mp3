@@ -6,7 +6,7 @@ Describes commit: 05f6955 (2026-10-28). Checked against main on that date: modul
 
 ## Public API
 
-`src/lib.rs` re-exports `Encoder`, `EncoderConfig`, `ConfigError`, `ENCODER_DELAY` (1057 samples) from `encoder`, `InfoTag` from `info`, `Id3Tag`, `Id3Error` and `with_id3` from `id3`, and the public `header` module (`FrameHeader`, `SampleRate`, `ChannelMode`, `Bitrate`, `PaddingSchedule`, `HeaderError`).
+`src/lib.rs` re-exports `Encoder`, `EncoderConfig`, `ConfigError`, `StereoMode`, `ENCODER_DELAY` (1057 samples) from `encoder`, `InfoTag` from `info`, `Id3Tag`, `Id3Error` and `with_id3` from `id3`, and the public `header` module (`FrameHeader`, `SampleRate`, `ChannelMode`, `Bitrate`, `PaddingSchedule`, `HeaderError`).
 
 ```
 EncoderConfig::new(rate, channels, kbps) | ::vbr(rate, channels, quality)
@@ -21,7 +21,7 @@ Users: WavCraft and SoundCraft (MP3 export), as a git dependency on a tag (SPEC 
 
 | Module | Owns | Uses |
 |---|---|---|
-| `encoder` | The public encoder: config checks, per-channel buffering, granule loop, VBR/CBR choice, lowpass, mid/side decision, finish and Info tag | attack, bitstream, filterbank, header, info, layout, mdct, psycho, quantize, reservoir |
+| `encoder` | The public encoder: config checks, stereo mode (auto, forced mid/side, forced left/right, dual channel), per-channel buffering, granule loop, VBR/CBR choice, lowpass, mid/side decision, finish and Info tag | attack, bitstream, filterbank, header, info, layout, mdct, psycho, quantize, reservoir |
 | `attack` | Transient detection with lookahead for window switching (short blocks) | - |
 | `filterbank` | Polyphase analysis filterbank (ISO/IEC 11172-3, Annex C.1.3) | tables |
 | `mdct` | Windowed MDCT on each subband, long and short blocks, alias reduction | filterbank |
@@ -75,6 +75,7 @@ flowchart LR
 ## Tests and CI
 
 - `tests/roundtrip.rs`: decode every sample rate, channel count and bitrate with symphonia and compare; pre-echo, CRC and Info-tag checks.
+- `tests/stereo_modes.rs`: forced stereo modes (forced mid/side, forced left/right, dual channel), default output 1.1.0 hash match, and wav2mp3 `--stereo` flags.
 - `tests/gapless.rs`: reads the LAME-layout fields back for every rate, length and mode; opt-in ffmpeg check (`--ignored`) that the decode has the input's exact length.
 - `tests/stress.rs`: long and edge-case input (denormals, silence, clipping).
 - Unit tests live beside each module.

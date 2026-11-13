@@ -17,6 +17,21 @@ use crate::reservoir::Reservoir;
 /// Granules per frame: two for MPEG-1, one for MPEG-2's low sample rates.
 const MAX_GRANULES: usize = 2;
 
+/// Stereo coding mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Hash)]
+#[non_exhaustive]
+pub enum StereoMode {
+    /// Automatic: decides mid/side stereo per frame (default).
+    #[default]
+    Auto,
+    /// Force mid/side stereo on every frame.
+    MidSide,
+    /// Force left/right stereo (no mid/side) on every frame.
+    LeftRight,
+    /// Dual channel: two independent mono channels in one stereo stream.
+    DualChannel,
+}
+
 /// Encoder settings.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct EncoderConfig {
@@ -43,6 +58,9 @@ pub struct EncoderConfig {
     /// Protect each frame's header and side information with a CRC-16, so
     /// decoders can detect corruption. Costs 2 bytes per frame.
     pub crc: bool,
+    /// Stereo coding mode: automatic (default), forced mid/side, forced left/right,
+    /// or dual channel.
+    pub stereo_mode: StereoMode,
 }
 
 impl EncoderConfig {
@@ -55,6 +73,7 @@ impl EncoderConfig {
             vbr_quality: None,
             info_tag: true,
             crc: false,
+            stereo_mode: StereoMode::Auto,
         }
     }
 
@@ -78,6 +97,7 @@ pub enum ConfigError {
     UnsupportedChannels(u16),
     UnsupportedBitrate(u32),
     UnsupportedVbrQuality(u8),
+    StereoOptionOnMono,
 }
 
 impl fmt::Display for ConfigError {
@@ -95,6 +115,9 @@ impl fmt::Display for ConfigError {
             Self::UnsupportedBitrate(kbps) => write!(f, "unsupported bitrate {kbps} kbit/s"),
             Self::UnsupportedVbrQuality(q) => {
                 write!(f, "unsupported VBR quality {q} (expected 0 to 9)")
+            }
+            Self::StereoOptionOnMono => {
+                write!(f, "stereo option is not supported for mono input")
             }
         }
     }
@@ -180,6 +203,7 @@ pub struct Encoder {
     pressure_db: f32,
     /// Channel the next interleaved input sample belongs to.
     next_channel: usize,
+    stereo_mode: StereoMode,
 }
 
 impl Encoder {
@@ -194,11 +218,21 @@ impl Encoder {
         if let Some(q) = config.vbr_quality.filter(|&q| q > 9) {
             return Err(ConfigError::UnsupportedVbrQuality(q));
         }
+        if config.channels == 1 && config.stereo_mode != StereoMode::Auto {
+            return Err(ConfigError::StereoOptionOnMono);
+        }
         let mode = match config.channels {
             1 => ChannelMode::Mono,
-            2 => ChannelMode::JointStereo {
-                mid_side: false,
-                intensity: false,
+            2 => match config.stereo_mode {
+                StereoMode::DualChannel => ChannelMode::DualChannel,
+                StereoMode::MidSide => ChannelMode::JointStereo {
+                    mid_side: true,
+                    intensity: false,
+                },
+                StereoMode::Auto | StereoMode::LeftRight => ChannelMode::JointStereo {
+                    mid_side: false,
+                    intensity: false,
+                },
             },
             n => return Err(ConfigError::UnsupportedChannels(n)),
         };
@@ -232,6 +266,7 @@ impl Encoder {
             frame_lengths: Vec::new(),
             pressure_db: 0.0,
             next_channel: 0,
+            stereo_mode: config.stereo_mode,
         })
     }
 
@@ -446,7 +481,13 @@ impl Encoder {
             })
             .collect();
 
-        let mid_side = channels == 2 && prefers_mid_side(&xr[0][..granules], &xr[1][..granules]);
+        let mid_side = match self.stereo_mode {
+            StereoMode::Auto => {
+                channels == 2 && prefers_mid_side(&xr[0][..granules], &xr[1][..granules])
+            }
+            StereoMode::MidSide => channels == 2,
+            StereoMode::LeftRight | StereoMode::DualChannel => false,
+        };
         if mid_side {
             // Noise in M and S reaches each output channel as (nM + nS) / 2,
             // so holding both under the quieter channel's threshold keeps
@@ -484,6 +525,7 @@ impl Encoder {
 
         let mode = match self.template.mode {
             ChannelMode::Mono => ChannelMode::Mono,
+            ChannelMode::DualChannel => ChannelMode::DualChannel,
             _ => ChannelMode::JointStereo {
                 mid_side,
                 intensity: false,
@@ -743,6 +785,22 @@ mod tests {
             Encoder::new(config(44_100, 2, 100)).err(),
             Some(ConfigError::UnsupportedBitrate(100))
         );
+    }
+
+    #[test]
+    fn mono_rejects_stereo_option() {
+        let mut c = config(44_100, 1, 64);
+        c.stereo_mode = StereoMode::MidSide;
+        assert_eq!(Encoder::new(c).err(), Some(ConfigError::StereoOptionOnMono));
+
+        c.stereo_mode = StereoMode::LeftRight;
+        assert_eq!(Encoder::new(c).err(), Some(ConfigError::StereoOptionOnMono));
+
+        c.stereo_mode = StereoMode::DualChannel;
+        assert_eq!(Encoder::new(c).err(), Some(ConfigError::StereoOptionOnMono));
+
+        c.stereo_mode = StereoMode::Auto;
+        assert!(Encoder::new(c).is_ok());
     }
 
     #[test]

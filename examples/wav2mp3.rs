@@ -2,6 +2,7 @@
 //!
 //! ```text
 //! cargo run --release --example wav2mp3 -- input.wav output.mp3 [kbps | --vbr Q] [--crc]
+//!     [--stereo ms|lr|auto|dual]
 //!     [--title T] [--artist A] [--album L] [--year YYYY] [--comment C]
 //!     [--chapter "name@seconds"]...
 //! ```
@@ -12,7 +13,7 @@
 use std::error::Error;
 use std::fs;
 
-use craft_mp3::{Encoder, EncoderConfig, Id3Tag, with_id3};
+use craft_mp3::{Encoder, EncoderConfig, Id3Tag, StereoMode, with_id3};
 
 /// Removes `flag value` from `args` and returns the value, if the flag is in
 /// there. Removing it first keeps it out of the positional arguments.
@@ -56,6 +57,26 @@ fn run() -> Result<(), Box<dyn Error>> {
     let mut args: Vec<String> = std::env::args().collect();
     let crc = args.iter().any(|a| a == "--crc");
     args.retain(|a| a != "--crc");
+    let stereo_mode = match args.iter().position(|a| a == "--stereo") {
+        Some(i) if i + 1 < args.len() => {
+            let mode = match args[i + 1].to_ascii_lowercase().as_str() {
+                "auto" => StereoMode::Auto,
+                "ms" => StereoMode::MidSide,
+                "lr" => StereoMode::LeftRight,
+                "dual" | "d" => StereoMode::DualChannel,
+                other => {
+                    return Err(format!(
+                        "unknown --stereo mode {other:?} (expected ms, lr, auto, or dual)"
+                    )
+                    .into());
+                }
+            };
+            args.drain(i..i + 2);
+            Some(mode)
+        }
+        Some(_) => return Err("--stereo needs a mode (ms, lr, auto, or dual)".into()),
+        None => None,
+    };
     let vbr = match args.iter().position(|a| a == "--vbr") {
         Some(i) if i + 1 < args.len() => {
             let quality: u8 = args[i + 1].parse()?;
@@ -74,7 +95,7 @@ fn run() -> Result<(), Box<dyn Error>> {
     let comment = take_value(&mut args, "--comment")?;
     let chapters = take_all(&mut args, "--chapter")?;
     let [_, input, output, rest @ ..] = args.as_slice() else {
-        return Err("usage: wav2mp3 <input.wav> <output.mp3> [kbps | --vbr Q] [--crc] [--title T] [--artist A] [--album L] [--year YYYY] [--comment C] [--chapter name@seconds]...".into());
+        return Err("usage: wav2mp3 <input.wav> <output.mp3> [kbps | --vbr Q] [--crc] [--stereo ms|lr|auto|dual] [--title T] [--artist A] [--album L] [--year YYYY] [--comment C] [--chapter name@seconds]...".into());
     };
     let bitrate_kbps = rest.first().map_or(Ok(128), |s| s.parse())?;
 
@@ -92,7 +113,10 @@ fn run() -> Result<(), Box<dyn Error>> {
         Some(quality) => EncoderConfig::vbr(sample_rate, channels, quality),
         None => EncoderConfig::new(sample_rate, channels, bitrate_kbps),
     };
-    let config = EncoderConfig { crc, ..base };
+    let mut config = EncoderConfig { crc, ..base };
+    if let Some(mode) = stereo_mode {
+        config.stereo_mode = mode;
+    }
     let mut encoder = Encoder::new(config)?;
     let mut mp3 = Vec::new();
     let total = match &samples {
