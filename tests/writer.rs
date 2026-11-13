@@ -172,3 +172,77 @@ fn ragged_byte_writes_match_single_write() {
 
     assert_eq!(actual, expected);
 }
+
+fn reference(config: EncoderConfig, samples: &[f32]) -> Vec<u8> {
+    let mut encoder = Encoder::new(config).unwrap();
+    let mut expected = Vec::new();
+    encoder.encode(samples, &mut expected);
+    if let Some(tag) = encoder.finish(&mut expected) {
+        tag.write_to(&mut expected);
+    }
+    expected
+}
+
+fn stereo_samples() -> Vec<i16> {
+    (0..6000)
+        .flat_map(|i| {
+            let t = f64::from(i) * 0.05;
+            [(t.sin() * 9000.0) as i16, ((t * 1.7).sin() * 7000.0) as i16]
+        })
+        .collect()
+}
+
+/// Feeds `bytes` in the given chunk sizes, cycling through them.
+fn feed<W: Write>(writer: &mut Writer<W>, bytes: &[u8], sizes: &[usize]) {
+    let mut offset = 0;
+    let mut i = 0;
+    while offset < bytes.len() {
+        let end = (offset + sizes[i % sizes.len()]).min(bytes.len());
+        writer.write_all(&bytes[offset..end]).unwrap();
+        offset = end;
+        i += 1;
+    }
+}
+
+#[test]
+fn ragged_stereo_writes_match_encode() {
+    let config = EncoderConfig::new(44_100, 2, 128);
+    let samples = stereo_samples();
+    let scaled: Vec<f32> = samples.iter().map(|&s| f32::from(s) / 32768.0).collect();
+    let expected = reference(config, &scaled);
+    let i16_bytes: Vec<u8> = samples.iter().flat_map(|s| s.to_le_bytes()).collect();
+    let f32_bytes: Vec<u8> = scaled.iter().flat_map(|s| s.to_le_bytes()).collect();
+
+    for sizes in [&[1, 3, 7, 5, 11][..], &[4093], &[1]] {
+        let mut w = Writer::new_i16(Encoder::new(config).unwrap(), Cursor::new(Vec::new()));
+        feed(&mut w, &i16_bytes, sizes);
+        assert_eq!(w.finish().unwrap().into_inner(), expected, "i16 {sizes:?}");
+
+        let mut w = Writer::new_f32(Encoder::new(config).unwrap(), Cursor::new(Vec::new()));
+        feed(&mut w, &f32_bytes, sizes);
+        assert_eq!(w.finish().unwrap().into_inner(), expected, "f32 {sizes:?}");
+    }
+}
+
+#[test]
+fn finish_keeps_data_written_before_the_stream() {
+    let config = EncoderConfig::new(44_100, 2, 128);
+    let samples = stereo_samples();
+    let scaled: Vec<f32> = samples.iter().map(|&s| f32::from(s) / 32768.0).collect();
+    let expected = reference(config, &scaled);
+    let bytes: Vec<u8> = samples.iter().flat_map(|s| s.to_le_bytes()).collect();
+
+    let prefix = b"ID3-stand-in-bytes";
+    let mut cursor = Cursor::new(Vec::new());
+    cursor.write_all(prefix).unwrap();
+    let mut w = Writer::new(Encoder::new(config).unwrap(), cursor);
+    feed(&mut w, &bytes, &[1000, 3]);
+    let cursor = w.finish().unwrap();
+
+    // The position is back at the end of the stream.
+    let len = cursor.get_ref().len() as u64;
+    assert_eq!(cursor.position(), len);
+    let out = cursor.into_inner();
+    assert_eq!(&out[..prefix.len()], prefix);
+    assert_eq!(&out[prefix.len()..], &expected[..]);
+}

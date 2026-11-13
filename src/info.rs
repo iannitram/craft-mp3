@@ -333,6 +333,15 @@ mod tests {
     }
 
     #[test]
+    fn crc16_update_in_chunks_matches_one_shot() {
+        let data: Vec<u8> = (0..1000u32).map(|i| (i * 31 % 251) as u8).collect();
+        for size in [1, 3, 7, 64] {
+            let crc = data.chunks(size).fold(0, crc16_update);
+            assert_eq!(crc, crc16(&data));
+        }
+    }
+
+    #[test]
     fn crc16_matches_the_crc16_arc_check_value() {
         // CRC-16/ARC (this polynomial, initial value 0, no final XOR) of "123456789".
         assert_eq!(crc16(b"123456789"), 0xBB3D);

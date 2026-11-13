@@ -699,6 +699,14 @@ pub enum SampleFormat {
 /// Call [`Writer::finish`] to encode the final frames and rewrite the Xing/Info
 /// tag at the beginning of the stream.
 ///
+/// Dropping a `Writer` without calling `finish` or `finish_unseekable` loses
+/// the audio still buffered in the encoder (up to about two frames) and any
+/// partial trailing sample, and leaves the stream without its last frames and
+/// Info tag. There is no `Drop` impl, because it would have to do I/O. If a
+/// write to the underlying writer fails, treat the stream as broken: samples
+/// from the failing call were already encoded and pending bytes would be
+/// repeated by a retry.
+///
 /// ```
 /// use std::io::{Cursor, Write};
 /// use craft_mp3::{Encoder, EncoderConfig, Writer};
@@ -715,6 +723,7 @@ pub enum SampleFormat {
 /// assert!(!mp3.is_empty());
 /// # Ok::<(), Box<dyn std::error::Error>>(())
 /// ```
+#[must_use = "call `finish` to write the last frames and the Info tag"]
 pub struct Writer<W> {
     encoder: Encoder,
     inner: W,
@@ -723,7 +732,17 @@ pub struct Writer<W> {
     tail_len: usize,
     chunk: Vec<f32>,
     mp3_buf: Vec<u8>,
-    start_pos: u64,
+    /// Bytes this writer has handed to `inner`, so `finish` can find the stream start.
+    bytes_written: u64,
+}
+
+fn emit_to<W: Write>(inner: &mut W, buf: &mut Vec<u8>, written: &mut u64) -> io::Result<()> {
+    if !buf.is_empty() {
+        inner.write_all(buf)?;
+        *written += buf.len() as u64;
+        buf.clear();
+    }
+    Ok(())
 }
 
 /// Alias for [`Writer`].
@@ -757,22 +776,8 @@ impl<W: Write> Writer<W> {
             tail_len: 0,
             chunk: Vec::with_capacity(CHUNK),
             mp3_buf: Vec::new(),
-            start_pos: 0,
+            bytes_written: 0,
         }
-    }
-
-    /// Sets the byte offset in the underlying writer where the MP3 stream starts.
-    ///
-    /// By default, `0`. [`finish`](Self::finish) seeks back to this offset to write
-    /// the completed Info tag.
-    pub fn with_start_pos(mut self, pos: u64) -> Self {
-        self.start_pos = pos;
-        self
-    }
-
-    /// Sets the byte offset in the underlying writer where the MP3 stream starts.
-    pub fn set_start_pos(&mut self, pos: u64) {
-        self.start_pos = pos;
     }
 
     /// Borrows the underlying writer.
@@ -788,6 +793,14 @@ impl<W: Write> Writer<W> {
     /// Consumes this writer, returning the underlying writer without finishing the stream.
     pub fn into_inner(self) -> W {
         self.inner
+    }
+
+    /// Writes the pending MP3 bytes to `inner` and counts them.
+    ///
+    /// If `inner` fails, the bytes stay pending and are retried by the next
+    /// call, so after an error the stream is not reliable; treat it as fatal.
+    fn emit(&mut self) -> io::Result<()> {
+        emit_to(&mut self.inner, &mut self.mp3_buf, &mut self.bytes_written)
     }
 
     fn flush_tail(&mut self) -> io::Result<()> {
@@ -807,10 +820,7 @@ impl<W: Write> Writer<W> {
             self.chunk.push(sample);
             self.encoder.encode(&self.chunk, &mut self.mp3_buf);
             self.chunk.clear();
-            if !self.mp3_buf.is_empty() {
-                self.inner.write_all(&self.mp3_buf)?;
-                self.mp3_buf.clear();
-            }
+            self.emit()?;
         }
         Ok(())
     }
@@ -818,14 +828,15 @@ impl<W: Write> Writer<W> {
     /// Finishes encoding the stream and writes the final frames to the underlying
     /// writer, but does not seek back to rewrite the Info tag.
     ///
-    /// Useful for unseekable destinations like network sockets.
+    /// Useful for unseekable destinations like network sockets. The stream
+    /// keeps the placeholder Info frame it began with: a valid, silent frame
+    /// with no frame count, byte count or seek table, so players still play it
+    /// but may estimate its length. A trailing partial sample is zero-padded,
+    /// as in [`finish`](Self::finish).
     pub fn finish_unseekable(mut self) -> io::Result<W> {
         self.flush_tail()?;
         self.encoder.finish(&mut self.mp3_buf);
-        if !self.mp3_buf.is_empty() {
-            self.inner.write_all(&self.mp3_buf)?;
-            self.mp3_buf.clear();
-        }
+        emit_to(&mut self.inner, &mut self.mp3_buf, &mut self.bytes_written)?;
         self.inner.flush()?;
         Ok(self.inner)
     }
@@ -834,17 +845,32 @@ impl<W: Write> Writer<W> {
 impl<W: Write + Seek> Writer<W> {
     /// Finishes encoding the stream, writing any remaining frames and the
     /// completed Info tag to the underlying writer, and returning the underlying writer.
+    ///
+    /// The Info tag is rewritten where this writer's first byte went: `finish`
+    /// takes the writer's current position and subtracts the bytes this
+    /// `Writer` wrote, so data written to `W` before the first `write` (such
+    /// as an ID3 tag) is left intact. Don't write to or seek `W` directly
+    /// (through [`get_mut`](Self::get_mut)) while streaming. The position
+    /// is restored afterwards.
+    ///
+    /// A trailing partial sample (fewer bytes than one sample) is zero-padded
+    /// into a final sample, and an incomplete set of channels is completed
+    /// with silence.
     pub fn finish(mut self) -> io::Result<W> {
         self.flush_tail()?;
         let tag = self.encoder.finish(&mut self.mp3_buf);
-        if !self.mp3_buf.is_empty() {
-            self.inner.write_all(&self.mp3_buf)?;
-            self.mp3_buf.clear();
-        }
+        emit_to(&mut self.inner, &mut self.mp3_buf, &mut self.bytes_written)?;
         if let Some(tag) = tag {
-            self.inner.seek(SeekFrom::Start(self.start_pos))?;
+            let end = self.inner.stream_position()?;
+            let start = end.checked_sub(self.bytes_written).ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "the writer's position is before the start of the stream",
+                )
+            })?;
+            self.inner.seek(SeekFrom::Start(start))?;
             self.inner.write_all(tag.as_bytes())?;
-            self.inner.seek(SeekFrom::End(0))?;
+            self.inner.seek(SeekFrom::Start(end))?;
         }
         self.inner.flush()?;
         Ok(self.inner)
@@ -883,20 +909,14 @@ impl<W: Write> Write for Writer<W> {
                     if self.chunk.len() == CHUNK {
                         self.encoder.encode(&self.chunk, &mut self.mp3_buf);
                         self.chunk.clear();
-                        if !self.mp3_buf.is_empty() {
-                            self.inner.write_all(&self.mp3_buf)?;
-                            self.mp3_buf.clear();
-                        }
+                        self.emit()?;
                     }
                 }
 
                 if !self.chunk.is_empty() {
                     self.encoder.encode(&self.chunk, &mut self.mp3_buf);
                     self.chunk.clear();
-                    if !self.mp3_buf.is_empty() {
-                        self.inner.write_all(&self.mp3_buf)?;
-                        self.mp3_buf.clear();
-                    }
+                    self.emit()?;
                 }
 
                 if !remainder.is_empty() {
@@ -927,20 +947,14 @@ impl<W: Write> Write for Writer<W> {
                     if self.chunk.len() == CHUNK {
                         self.encoder.encode(&self.chunk, &mut self.mp3_buf);
                         self.chunk.clear();
-                        if !self.mp3_buf.is_empty() {
-                            self.inner.write_all(&self.mp3_buf)?;
-                            self.mp3_buf.clear();
-                        }
+                        self.emit()?;
                     }
                 }
 
                 if !self.chunk.is_empty() {
                     self.encoder.encode(&self.chunk, &mut self.mp3_buf);
                     self.chunk.clear();
-                    if !self.mp3_buf.is_empty() {
-                        self.inner.write_all(&self.mp3_buf)?;
-                        self.mp3_buf.clear();
-                    }
+                    self.emit()?;
                 }
 
                 if !remainder.is_empty() {
@@ -954,10 +968,7 @@ impl<W: Write> Write for Writer<W> {
     }
 
     fn flush(&mut self) -> io::Result<()> {
-        if !self.mp3_buf.is_empty() {
-            self.inner.write_all(&self.mp3_buf)?;
-            self.mp3_buf.clear();
-        }
+        self.emit()?;
         self.inner.flush()
     }
 }
