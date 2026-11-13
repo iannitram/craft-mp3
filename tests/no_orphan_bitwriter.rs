@@ -22,6 +22,7 @@ fn src_holds_exactly_the_expected_files() {
     assert_eq!(
         names,
         [
+            "analysis.rs",
             "attack.rs",
             "bitstream.rs",
             "encoder.rs",
