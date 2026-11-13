@@ -45,5 +45,5 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.99.0
       - uses: Swatinem/rust-cache@v2
       - run: rustup target add wasm32-unknown-unknown
-      - run: cargo build --target wasm32-unknown-unknown
+      - run: cargo build --locked --target wasm32-unknown-unknown
 
