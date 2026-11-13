@@ -165,8 +165,13 @@ impl Counts {
 /// CRC-16 with polynomial 0xA001 (0x8005 bit-reversed), initial value 0 and
 /// no final XOR, as LAME's tag uses.
 pub(crate) fn crc16(bytes: &[u8]) -> u16 {
-    bytes.iter().fold(0, |crc, &b| {
-        (crc >> 8) ^ CRC16_TABLE[usize::from((crc ^ u16::from(b)) & 0xFF)]
+    crc16_update(0, bytes)
+}
+
+/// Accumulates bytes into a running CRC-16.
+pub(crate) fn crc16_update(crc: u16, bytes: &[u8]) -> u16 {
+    bytes.iter().fold(crc, |c, &b| {
+        (c >> 8) ^ CRC16_TABLE[usize::from((c ^ u16::from(b)) & 0xFF)]
     })
 }
 
@@ -325,6 +330,15 @@ mod tests {
         tag.write_to(&mut stream);
         assert_eq!(&stream[..tag.as_bytes().len()], tag.as_bytes());
         assert!(stream[tag.as_bytes().len()..].iter().all(|&b| b == 0xAA));
+    }
+
+    #[test]
+    fn crc16_update_in_chunks_matches_one_shot() {
+        let data: Vec<u8> = (0..1000u32).map(|i| (i * 31 % 251) as u8).collect();
+        for size in [1, 3, 7, 64] {
+            let crc = data.chunks(size).fold(0, crc16_update);
+            assert_eq!(crc, crc16(&data));
+        }
     }
 
     #[test]

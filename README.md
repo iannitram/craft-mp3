@@ -14,6 +14,20 @@ if let Some(tag) = encoder.finish(&mut mp3) {
 }
 ```
 
+To stream directly to a file or socket without buffering the stream:
+
+```rust
+use std::fs::File;
+use std::io::Write;
+use craft_mp3::{Encoder, EncoderConfig, Writer};
+
+let encoder = Encoder::new(EncoderConfig::new(44_100, 2, 128))?;
+let file = File::create("output.mp3")?;
+let mut writer = Writer::new(encoder, file); // takes interleaved i16 PCM bytes by default
+writer.write_all(&pcm_bytes)?; // or Writer::new_f32 for 32-bit float PCM bytes
+writer.finish()?; // writes final frames and overwrites the Info tag
+```
+
 To convert a WAV file:
 
 ```text
@@ -42,6 +56,8 @@ cargo run --release --example wav2mp3 -- input.wav output.mp3 [kbps | --vbr Q] [
   frame offsets for VBR), LAME-layout delay and padding so gapless players
   play the exact input length (see below), and optional CRC-16 frame
   protection.
+- A `std::io::Write` adapter ([`Writer`]) to stream interleaved `i16` or `f32`
+  PCM directly to a file or socket as samples arrive.
 
 About 25× realtime for stereo on one core.
 
