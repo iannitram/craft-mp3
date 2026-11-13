@@ -48,6 +48,6 @@ mod quantize;
 mod reservoir;
 mod tables;
 
-pub use encoder::{ConfigError, ENCODER_DELAY, Encoder, EncoderConfig};
+pub use encoder::{ConfigError, ENCODER_DELAY, Encoder, EncoderConfig, StereoMode};
 pub use id3::{Id3Error, Id3Tag, with_id3};
 pub use info::InfoTag;

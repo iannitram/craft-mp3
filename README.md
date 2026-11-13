@@ -18,6 +18,7 @@ To convert a WAV file:
 
 ```text
 cargo run --release --example wav2mp3 -- input.wav output.mp3 [kbps | --vbr Q] [--crc]
+    [--stereo ms|lr|auto|dual]
     [--title T] [--artist A] [--album L] [--year YYYY] [--comment C]
     [--chapter "name@seconds"]...
 ```
@@ -25,7 +26,7 @@ cargo run --release --example wav2mp3 -- input.wav output.mp3 [kbps | --vbr Q] [
 ## What it does
 
 - Layer III at 32, 44.1 and 48 kHz (MPEG-1) and 16, 22.05 and 24 kHz
-  (MPEG-2); mono or joint stereo.
+  (MPEG-2); mono, joint stereo or dual channel.
 - Constant bitrate (32 to 320 kbit/s, or 8 to 160 at the MPEG-2 rates) or
   variable bitrate at quality 0 (best) to 9 (smallest), on a scale close to
   LAME's V0..V9.
@@ -34,8 +35,9 @@ cargo run --release --example wav2mp3 -- input.wav output.mp3 [kbps | --vbr Q] [
 - A psychoacoustic model: threshold of hearing, Bark-scale masking, and a
   masking offset that depends on how tonal each band is.
 - Noise shaping with scale factors and subblock gains, a bit reservoir that
-  saves bits on easy frames for hard ones, per-frame mid/side stereo, and a
-  bitrate-dependent lowpass.
+  saves bits on easy frames for hard ones, per-frame mid/side stereo (with
+  forced mid/side, forced left/right or dual channel via [`StereoMode`]),
+  and a bitrate-dependent lowpass.
 - A Xing/Info tag with frame count and seek table (built from the real
   frame offsets for VBR), LAME-layout delay and padding so gapless players
   play the exact input length (see below), and optional CRC-16 frame
