@@ -33,7 +33,7 @@ Users: WavCraft and SoundCraft (MP3 export), as a git dependency on a tag (SPEC 
 | `reservoir` | Frame assembly with the Layer III bit reservoir | - |
 | `bitstream` | MSB-first bit packing (`BitWriter`, crate-private) | - |
 | `header` (public) | The 32-bit frame header, bitrates, sample rates, channel modes, frame sizing and padding schedule | bitstream |
-| `info` | The Xing/Info tag: frame and byte counts, seek table, LAME-layout delay, padding and CRCs (`LAMEcraft` marker), CRC-16 | bitstream, encoder (`ENCODER_DELAY`), header |
+| `info` | The Xing/Info tag: frame and byte counts, seek table, LAME-layout peak, delay, padding and CRCs (`LAMEcraft` marker), CRC-16 | bitstream, encoder (`ENCODER_DELAY`), header |
 | `tables` | Shared ISO constant tables (synthesis window D[i], Table B.3) | - |
 | `id3` (public: `Id3Tag`, `Id3Error`, `with_id3`) | ID3v2.4 tag in front of the stream: text frames, COMM, CTOC and CHAP chapters | - |
 | `bitwriter.rs` | Orphaned file, not compiled; removed by #2 | - |

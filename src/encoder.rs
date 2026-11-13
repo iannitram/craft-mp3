@@ -58,6 +58,9 @@ pub struct EncoderConfig {
     /// Protect each frame's header and side information with a CRC-16, so
     /// decoders can detect corruption. Costs 2 bytes per frame.
     pub crc: bool,
+    /// Compute and record the input's peak amplitude in the Info tag's
+    /// ReplayGain field. Off by default, so default output stays byte-identical to 1.1.0.
+    pub replaygain: bool,
     /// Stereo coding mode: automatic (default), forced mid/side, forced left/right,
     /// or dual channel.
     pub stereo_mode: StereoMode,
@@ -73,6 +76,7 @@ impl EncoderConfig {
             vbr_quality: None,
             info_tag: true,
             crc: false,
+            replaygain: false,
             stereo_mode: StereoMode::Auto,
         }
     }
@@ -189,6 +193,7 @@ pub struct Encoder {
     /// For VBR, how far the noise targets are relaxed, in dB.
     vbr_relax_db: Option<f32>,
     info_tag: bool,
+    replaygain: bool,
     /// Length of the tag frame, once written.
     tag_len: usize,
     /// Where the tag frame was written in `out`; the audio follows it.
@@ -203,6 +208,8 @@ pub struct Encoder {
     pressure_db: f32,
     /// Channel the next interleaved input sample belongs to.
     next_channel: usize,
+    /// Maximum absolute sample value seen in the input, for ReplayGain.
+    peak: f32,
     stereo_mode: StereoMode,
 }
 
@@ -260,12 +267,14 @@ impl Encoder {
                 .vbr_quality
                 .map(|q| VBR_BEST_DB + f32::from(q) * VBR_STEP_DB),
             info_tag: config.info_tag,
+            replaygain: config.replaygain,
             tag_len: 0,
             stream_start: 0,
             lame_quality: config.vbr_quality.map_or(100, |q| 100 - 10 * q),
             frame_lengths: Vec::new(),
             pressure_db: 0.0,
             next_channel: 0,
+            peak: 0.0,
             stereo_mode: config.stereo_mode,
         })
     }
@@ -285,6 +294,7 @@ impl Encoder {
             } else {
                 sample.clamp(-MAX_SAMPLE, MAX_SAMPLE)
             };
+            self.peak = self.peak.max(sample.abs());
             let ch = self.next_channel;
             let state = &mut self.channels[ch];
             state.pending.push(sample);
@@ -377,6 +387,9 @@ impl Encoder {
         counts.music_len = u32::try_from(audio.len()).unwrap_or(u32::MAX);
         counts.music_crc = info::crc16(audio);
         counts.quality = self.lame_quality;
+        if self.replaygain {
+            counts.peak = self.peak;
+        }
         Some(info::tag_frame(
             &self.tag_template(),
             self.vbr_relax_db.is_some(),

@@ -3,13 +3,13 @@
 //! duration and seek without scanning the file.
 //!
 //! The tag also carries LAME's layout extension after the seek table: a
-//! 9-byte encoder string, the encoder delay and padding, the music length and
-//! two CRC-16s. The string is [`LAYOUT_MARKER`], which says the fields follow
-//! LAME's layout; it does not claim that LAME encoded the stream. ffmpeg
-//! applies the delay and padding only when the string starts with `LAME`,
-//! `Lavf` or `Lavc`, so the marker starts with `LAME`. Players that apply
-//! them trim the encoder delay and padding, and the stream plays back at the
-//! input's exact length.
+//! 9-byte encoder string, the input peak amplitude, the encoder delay and
+//! padding, the music length and two CRC-16s. The string is [`LAYOUT_MARKER`],
+//! which says the fields follow LAME's layout; it does not claim that LAME
+//! encoded the stream. ffmpeg applies the delay and padding only when the
+//! string starts with `LAME`, `Lavf` or `Lavc`, so the marker starts with
+//! `LAME`. Players that apply them trim the encoder delay and padding, and the
+//! stream plays back at the input's exact length.
 //!
 //! The encoder can't know the counts until the end, so it writes a
 //! placeholder tag first and hands back the finished one from
@@ -33,6 +33,28 @@ pub(crate) const LAYOUT_MARKER: &[u8; 9] = b"LAMEcraft";
 /// VBR (its "mtrh" method).
 const CBR_METHOD: u8 = 1;
 const VBR_METHOD: u8 = 4;
+
+/// The unit of the 32-bit fixed-point (9.23) peak amplitude field: 1.0 is
+/// represented by `1 << 23` (8,388,608).
+pub(crate) const PEAK_UNIT: f32 = 8_388_608.0;
+
+/// Encodes an input peak amplitude into LAME's 32-bit fixed-point (9.23) format.
+///
+/// Silence, non-positive and NaN values are encoded as 0. Values are scaled by
+/// $2^{23}$ (8,388,608) and rounded to the nearest integer.
+pub(crate) fn encode_peak(peak: f32) -> u32 {
+    if peak.is_nan() || peak <= 0.0 {
+        0
+    } else {
+        ((peak * PEAK_UNIT).round() as u64).min(u32::MAX as u64) as u32
+    }
+}
+
+/// Decodes LAME's 32-bit fixed-point (9.23) peak amplitude back to `f32`.
+#[cfg(test)]
+pub(crate) fn decode_peak(raw: u32) -> f32 {
+    raw as f32 / PEAK_UNIT
+}
 
 /// The encoder delay the tag records: decoders skip this many samples plus
 /// their own 529, so the total is [`ENCODER_DELAY`].
@@ -105,11 +127,14 @@ pub(crate) struct Counts {
     pub(crate) music_crc: u16,
     /// LAME's quality indicator, 0 (worst) to 100 (best).
     pub(crate) quality: u8,
+    /// Absolute peak amplitude of the input signal, scaled so 1.0 is full scale.
+    pub(crate) peak: f32,
 }
 
 impl Counts {
     /// Builds the counts from each audio frame's length; `tag_len` is the
-    /// tag frame's. The gapless fields are left at zero for the caller to set.
+    /// tag frame's. The gapless and replaygain fields are left at zero for the
+    /// caller to set.
     pub(crate) fn from_frame_lengths(tag_len: usize, frame_lengths: &[u32]) -> Self {
         let frames = frame_lengths.len();
         let mut offsets = Vec::with_capacity(frames);
@@ -132,6 +157,7 @@ impl Counts {
             music_len: 0,
             music_crc: 0,
             quality: 100,
+            peak: 0.0,
         }
     }
 }
@@ -185,8 +211,17 @@ fn tag_body(vbr: bool, counts: Option<&Counts>) -> Vec<u8> {
     // LAME's extension: the encoder string, then the fields in order.
     body.extend_from_slice(LAYOUT_MARKER);
     body.push(if vbr { VBR_METHOD } else { CBR_METHOD });
-    // Lowpass, peak, replay gains, encoding flags and ABR minimum: not recorded.
-    body.extend_from_slice(&[0; 11]);
+    // Lowpass filter frequency: not recorded (0).
+    body.push(0);
+    // Peak signal amplitude (9.23 fixed-point, scaled by 1 << 23).
+    body.extend_from_slice(&encode_peak(counts.peak).to_be_bytes());
+    // Radio Replay Gain and Audiophile Replay Gain (track and album gain):
+    // left at 0 (not set / unknown). Full ReplayGain 2.0 requires ITU-R
+    // BS.1770 loudness measurement over the complete stream, which is not
+    // performed during streaming encoding.
+    body.extend_from_slice(&[0; 4]);
+    // Encoding flags and ABR minimum: not recorded.
+    body.extend_from_slice(&[0; 2]);
     // Delay and padding, 12 bits each, packed into three bytes.
     let delay_padding = ((DELAY_FIELD as u32) << 12) | (counts.padding & MAX_PADDING);
     body.extend_from_slice(&delay_padding.to_be_bytes()[1..]);
@@ -300,6 +335,20 @@ mod tests {
     }
 
     #[test]
+    fn peak_of_silence_is_zero() {
+        assert_eq!(encode_peak(0.0), 0);
+        assert_eq!(decode_peak(0), 0.0);
+        assert_eq!(encode_peak(-1.0), 0);
+        assert_eq!(encode_peak(f32::NAN), 0);
+    }
+
+    #[test]
+    fn peak_of_full_scale_is_one() {
+        assert_eq!(encode_peak(1.0), 1 << 23);
+        assert_eq!(decode_peak(1 << 23), 1.0);
+    }
+
+    #[test]
     fn lame_layout_fields_follow_the_seek_table() {
         let stereo = ChannelMode::JointStereo {
             mid_side: false,
@@ -311,6 +360,7 @@ mod tests {
             music_len: 418,
             music_crc: 0x1234,
             quality: 60,
+            peak: 0.5,
             ..Counts::from_frame_lengths(418, &[418])
         };
         let tag = tag_frame(&t, true, Some(&counts));
@@ -321,6 +371,9 @@ mod tests {
         assert_eq!(&at_body(116)[..4], &[0, 0, 0, 60]);
         assert_eq!(&at_body(120)[..9], LAYOUT_MARKER);
         assert_eq!(at_body(129)[0], VBR_METHOD);
+        assert_eq!(at_body(130)[0], 0); // Lowpass
+        assert_eq!(&at_body(131)[..4], &encode_peak(0.5).to_be_bytes());
+        assert_eq!(&at_body(135)[..4], &[0; 4]); // Radio and Audiophile ReplayGain
         // 528 in the top 12 bits, 700 in the bottom 12.
         let delay_padding = (528u32 << 12) | 700;
         assert_eq!(&at_body(141)[..3], &delay_padding.to_be_bytes()[1..]);
