@@ -180,6 +180,10 @@ estimate resembles the encoder's own model, so it likely flatters
 craft-mp3. Read it as "in LAME's league on this material", not "better than
 LAME".
 
+## WebAssembly
+
+The library builds for `wasm32-unknown-unknown` (`cargo build --target wasm32-unknown-unknown`). Because the crate is pure Rust with no C dependencies, no `unsafe`, and no OS or threading requirements, it compiles directly to WebAssembly for web and browser hosts. CI checks the wasm32 build on every pull request.
+
 ## Testing
 
 `cargo test` runs unit tests for every stage and round-trip tests that
@@ -189,7 +193,8 @@ around transients, CRC streams, the Info tag and its LAME-layout gapless
 fields. The ffmpeg check in `tests/gapless.rs` is opt-in (`--ignored`), and
 `tests/id3.rs` reads the tags back with symphonia (and, opt-in, with ffprobe
 and ffmpeg: `cargo test --test id3 -- --ignored`). CI runs
-fmt, clippy and the tests on every pull request.
+fmt, clippy and the tests on macOS, Windows and Linux, plus a wasm32 build
+check, on every pull request.
 
 ## License
 
