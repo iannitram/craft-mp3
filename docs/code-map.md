@@ -83,11 +83,11 @@ flowchart LR
 - `tests/gapless.rs`: reads the LAME-layout fields back for every rate, length and mode; opt-in ffmpeg check (`--ignored`) that the decode has the input's exact length.
 - `tests/stress.rs`: long and edge-case input (denormals, silence, clipping).
 - Unit tests live beside each module.
-- `.github/workflows/ci.yml`: fmt, clippy (`-D warnings`) and tests on Rust 1.99, plus the MSRV (1.88) test run. Linux only today; Mac and Windows are #3.
+- `.github/workflows/ci.yml`: fmt, clippy (`-D warnings`) and tests on Rust 1.99 (macOS, Windows and Linux, #3), plus the MSRV (1.88) test run and a `wasm` job checking `cargo build --target wasm32-unknown-unknown` on Linux (#39).
 
 ## Mac, PC and Linux
 
-No platform code anywhere: the same source builds everywhere. What can differ per OS is only tooling: path separators and CRLF in test fixtures (none today) and the Windows shell in CI (#3 sets `shell: bash`).
+No platform code anywhere: the same source builds everywhere, including WebAssembly (`wasm32-unknown-unknown`, #39). What can differ per OS is only tooling: path separators and CRLF in test fixtures (none today) and the Windows shell in CI (#3 sets `shell: bash`).
 
 ## Open-source pieces
 

@@ -2,6 +2,7 @@
 
 Newest first. One line per change of stage, release or decision that the next session needs.
 
+- 2026-11-12 WebAssembly build check (#39): CI builds the library for wasm32-unknown-unknown on Linux; README documents wasm support; library builds cleanly as pure Rust with no unsafe.
 - 2026-11-12 ReplayGain (#37): peak amplitude of the decoded input recorded in the LAME-layout tag (off by default, `EncoderConfig::replaygain`, so default output is unchanged; owner's choice), tag CRC recomputed; track gain left zero because streaming ReplayGain 2.0 loudness is not computed.
 - 2026-11-12 Forced stereo modes (#35): StereoMode option on EncoderConfig (Auto, MidSide, LeftRight, DualChannel) with default output byte-identical to 1.1.0; wav2mp3 --stereo flag; mono input with stereo option rejected with ConfigError.
 - 2026-11-12 ID3v2.4 tags (#29): `Id3Tag` (title, artist, album, year, comment, chapters from WavCraft markers as CTOC/CHAP) and `with_id3`, which puts the tag in front of the stream so the Info frame stays first; `wav2mp3` gets `--title`, `--artist`, `--album`, `--year`, `--comment` and `--chapter name@seconds`. Streams without a tag are byte-identical. The version bump waits for the release.
