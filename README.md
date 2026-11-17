@@ -31,7 +31,7 @@ writer.finish()?; // writes final frames and overwrites the Info tag
 To convert a WAV file:
 
 ```text
-cargo run --release --example wav2mp3 -- input.wav output.mp3 [kbps | --vbr Q] [--crc]
+cargo run --release --example wav2mp3 -- input.wav output.mp3 [kbps | --vbr Q] [--crc] [--replaygain]
     [--stereo ms|lr|auto|dual]
     [--title T] [--artist A] [--album L] [--year YYYY] [--comment C]
     [--chapter "name@seconds"]...
