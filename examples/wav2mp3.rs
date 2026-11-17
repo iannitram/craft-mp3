@@ -115,7 +115,11 @@ fn run() -> Result<(), Box<dyn Error>> {
         Some(quality) => EncoderConfig::vbr(sample_rate, channels, quality),
         None => EncoderConfig::new(sample_rate, channels, bitrate_kbps),
     };
-    let mut config = EncoderConfig { crc, replaygain, ..base };
+    let mut config = EncoderConfig {
+        crc,
+        replaygain,
+        ..base
+    };
     if let Some(mode) = stereo_mode {
         config.stereo_mode = mode;
     }
