@@ -1,7 +1,7 @@
 //! Encodes a WAV file (16-bit or 24-bit integer PCM, or 32-bit IEEE float) to MP3.
 //!
 //! ```text
-//! cargo run --release --example wav2mp3 -- input.wav output.mp3 [kbps | --vbr Q] [--crc]
+//! cargo run --release --example wav2mp3 -- input.wav output.mp3 [kbps | --vbr Q] [--crc] [--replaygain]
 //!     [--stereo ms|lr|auto|dual]
 //!     [--title T] [--artist A] [--album L] [--year YYYY] [--comment C]
 //!     [--chapter "name@seconds"]...
@@ -57,6 +57,8 @@ fn run() -> Result<(), Box<dyn Error>> {
     let mut args: Vec<String> = std::env::args().collect();
     let crc = args.iter().any(|a| a == "--crc");
     args.retain(|a| a != "--crc");
+    let replaygain = args.iter().any(|a| a == "--replaygain");
+    args.retain(|a| a != "--replaygain");
     let stereo_mode = match args.iter().position(|a| a == "--stereo") {
         Some(i) if i + 1 < args.len() => {
             let mode = match args[i + 1].to_ascii_lowercase().as_str() {
@@ -95,7 +97,7 @@ fn run() -> Result<(), Box<dyn Error>> {
     let comment = take_value(&mut args, "--comment")?;
     let chapters = take_all(&mut args, "--chapter")?;
     let [_, input, output, rest @ ..] = args.as_slice() else {
-        return Err("usage: wav2mp3 <input.wav> <output.mp3> [kbps | --vbr Q] [--crc] [--stereo ms|lr|auto|dual] [--title T] [--artist A] [--album L] [--year YYYY] [--comment C] [--chapter name@seconds]...".into());
+        return Err("usage: wav2mp3 <input.wav> <output.mp3> [kbps | --vbr Q] [--crc] [--replaygain] [--stereo ms|lr|auto|dual] [--title T] [--artist A] [--album L] [--year YYYY] [--comment C] [--chapter name@seconds]...".into());
     };
     let bitrate_kbps = rest.first().map_or(Ok(128), |s| s.parse())?;
 
@@ -113,7 +115,7 @@ fn run() -> Result<(), Box<dyn Error>> {
         Some(quality) => EncoderConfig::vbr(sample_rate, channels, quality),
         None => EncoderConfig::new(sample_rate, channels, bitrate_kbps),
     };
-    let mut config = EncoderConfig { crc, ..base };
+    let mut config = EncoderConfig { crc, replaygain, ..base };
     if let Some(mode) = stereo_mode {
         config.stereo_mode = mode;
     }
