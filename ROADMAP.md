@@ -1,6 +1,6 @@
 # Roadmap
 
-Updated: 2026-11-12
+Updated: 2026-11-18
 
 features:
 - encoder: The Layer III encoder: MPEG-1 and MPEG-2 rates, mono and joint stereo, CBR and VBR, the Info tag, CRC-16; pure Rust, no unsafe (SPEC M1, M2)
@@ -22,7 +22,7 @@ agree on every stream checked.
 Where it stands (2026-11-12): 1.0.0 is released. Every 1.0 item below is built and merged
 (PRs #12 to #22, 2026-11-02 to 2026-11-04), issues #2 to #11 and #16 are closed, and the
 tag `v1.0.0` exists. The gapless delay and padding fields (#25) and the decoder-buffer
-fix (#24) are merged; release 1.1.0 is in review (PR #28). The After 1.0 plan is below.
+fix (#24) are merged and release 1.1.0 is out (#28, closed). A1 (#29), ID3v2.4 tags, the benchmark harness (part of #30) and the peer scan (#31, #33) are done. The After 1.0 plan is below.
 
 ## After 1.0
 
@@ -38,6 +38,10 @@ These are planned, in milestone "After 1.0":
 - A3. *(#31)* **Peer scan.** Compare LAME, Shine, ffmpeg and the Rust MP3 crates with
   craft-mp3, start `SPEC.md` `## Prior art`, and file each gap worth having as its own
   `from-peer` issue in this milestone.
+
+- A4. *(#34)* **ABR mode.** Average-bitrate encoding, the gap the peer scan found in LAME (open).
+- A5. *(#35, #36, #37, #38, #39)* **Peer-scan gaps, all done:** forced stereo modes (#35), 24-bit and float WAV input (#36), ReplayGain peak in the Info tag (#37), `std::io::Write` adapter (#38), wasm32 CI build (#39).
+- A6. *(#47, #49)* **wav2mp3 follow-ups.** `--replaygain` (#49, done); CLI tests that find the example without cargo's unhashed copy (#47, open; Rust 1.100).
 
 ## Before the first release (all done)
 

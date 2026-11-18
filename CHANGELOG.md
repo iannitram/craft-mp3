@@ -2,6 +2,7 @@
 
 Newest first. One line per change of stage, release or decision that the next session needs.
 
+- 2026-11-18 PM doc audit: ROADMAP After 1.0 lists A4 to A6 (#34 to #39, #47, #49) and the 1.1.0 status is fixed; code map drops the removed bitwriter.rs and lists every test file.
 - 2026-11-12 Write adapter (#38): `std::io::Write` adapter (`Writer`) streaming interleaved `i16` or `f32` bytes directly to a writer, with `finish` writing final frames and the Info tag byte-identically to `Encoder::encode`.
 - 2026-11-12 WebAssembly build check (#39): CI builds the library for wasm32-unknown-unknown on Linux; README documents wasm support; library builds cleanly as pure Rust with no unsafe.
 - 2026-11-12 ReplayGain (#37): peak amplitude of the decoded input recorded in the LAME-layout tag (off by default, `EncoderConfig::replaygain`, so default output is unchanged; owner's choice), tag CRC recomputed; track gain left zero because streaming ReplayGain 2.0 loudness is not computed.

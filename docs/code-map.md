@@ -1,8 +1,8 @@
 # craft-mp3 code map
 
-A pure-Rust MP3 (MPEG-1 and MPEG-2 Layer III) encoder library, about 5 350 lines of source in `src/` (plus about 640 of tests and the example). No runtime dependencies; `#![forbid(unsafe_code)]`. Spec: [SPEC.md](../SPEC.md).
+A pure-Rust MP3 (MPEG-1 and MPEG-2 Layer III) encoder library, about 6 800 lines of source in `src/` (plus about 3 400 of tests and the examples). No runtime dependencies; `#![forbid(unsafe_code)]`. Spec: [SPEC.md](../SPEC.md).
 
-Describes commit: 05f6955 (2026-10-28). Checked against main on that date: modules, `lib.rs` exports, the `Uses` column, line counts, the public API calls and the CI jobs all match the tree; nothing else changed.
+Describes commit: 613af49 (2026-11-18). Checked against main on that date: modules in `src/` (the orphaned `bitwriter.rs` is gone, #2/#20), `lib.rs` exports, the CI jobs and the test list match the tree.
 
 ## Public API
 
@@ -38,7 +38,6 @@ Users: WavCraft and SoundCraft (MP3 export), as a git dependency on a tag (SPEC 
 | `info` | The Xing/Info tag: frame and byte counts, seek table, LAME-layout peak, delay, padding and CRCs (`LAMEcraft` marker), CRC-16 | bitstream, encoder (`ENCODER_DELAY`), header |
 | `tables` | Shared ISO constant tables (synthesis window D[i], Table B.3) | - |
 | `id3` (public: `Id3Tag`, `Id3Error`, `with_id3`) | ID3v2.4 tag in front of the stream: text frames, COMM, CTOC and CHAP chapters | - |
-| `bitwriter.rs` | Orphaned file, not compiled; removed by #2 | - |
 
 ```mermaid
 flowchart LR
@@ -85,6 +84,12 @@ flowchart LR
 - `tests/writer.rs`: `std::io::Write` adapter file round-trip with symphonia and error propagation.
 - `tests/gapless.rs`: reads the LAME-layout fields back for every rate, length and mode; opt-in ffmpeg check (`--ignored`) that the decode has the input's exact length.
 - `tests/stress.rs`: long and edge-case input (denormals, silence, clipping).
+- `tests/chunked_encode.rs`, `chunked_identity.rs`, `chunked_sizes.rs`: `encode_i16` and `encode_planar` work in fixed-size chunks and give the same bytes as one call (#9, #18).
+- `tests/decoder_buffer.rs`: each frame and its borrowed bytes stay within the decoder's 7680-bit buffer (#24).
+- `tests/id3.rs`: ID3v2.4 text, COMM, CTOC and CHAP frames (#29).
+- `tests/non_exhaustive.rs`, `no_orphan_bitwriter.rs`, `release_1_0_0.rs`: public-enum and release guards (#8, #2, #11).
+- `tests/bench_metrics.rs`, `bench_smoke.rs`: the benchmark metrics and a smoke run of the harness (#30).
+- `tests/wav2mp3_checks.rs`, `wav2mp3_replaygain.rs`, `wav2mp3_zero_size_bytes.rs`: the example's input hardening, 24-bit and float WAV, `--replaygain` (#10, #36, #37).
 - Unit tests live beside each module.
 - `.github/workflows/ci.yml`: fmt, clippy (`-D warnings`) and tests on Rust 1.99 (macOS, Windows and Linux, #3), plus the MSRV (1.88) test run and a `wasm` job checking `cargo build --target wasm32-unknown-unknown` on Linux (#39).
 
