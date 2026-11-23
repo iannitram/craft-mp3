@@ -15,3 +15,5 @@ Everything you need to work here is in this repo. The full pipeline and rules (`
 
 - **No C dependencies and no `unsafe`** (README). It is a library used by WavCraft and SoundCraft: keep the public API in README working, or bump the version.
 - Plan: `ROADMAP.md`.
+
+**Upstream and peers:** see `PEERS.md` at the repo root. When I say "upstream", I mean the repo in its Upstream section; reuse a peer's code only as that file allows.
