@@ -1,6 +1,6 @@
 # Peer scan (2026-11-12)
 
-Part of [issue #31](https://github.com/iannitram/craft-mp3/issues/31) (After 1.0, item A3). The peer list and the licences are in [SPEC.md `## Prior art`](../SPEC.md). The feature list comes from issue #31.
+Part of [issue #31](https://github.com/iannitram/craft-mp3/issues/31) (After 1.0, item A3). The peer list and the licences are in [`PEERS.md`](../PEERS.md). The feature list comes from issue #31.
 
 Key: **yes**, **no**, **partial** (some of it, or only by a workaround), **?** (not confirmed on a page I read). craft-mp3's column is read from this repo's code. Each cell cites a source number; the sources are listed at the end, and each one was fetched and returned HTTP 200 on 2026-11-12.
 

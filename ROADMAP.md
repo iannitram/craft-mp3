@@ -36,7 +36,7 @@ These are planned, in milestone "After 1.0":
   log-spectral distance, bandwidth) beside LAME and ffmpeg run as external reference
   binaries only (no code copied). Targets are set after the first measurement.
 - A3. *(#31)* **Peer scan.** Compare LAME, Shine, ffmpeg and the Rust MP3 crates with
-  craft-mp3, start `SPEC.md` `## Prior art`, and file each gap worth having as its own
+  craft-mp3, start `PEERS.md`, and file each gap worth having as its own
   `from-peer` issue in this milestone.
 
 - A4. *(#34)* **ABR mode.** Average-bitrate encoding, the gap the peer scan found in LAME (open).
